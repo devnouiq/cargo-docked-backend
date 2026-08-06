@@ -1,6 +1,11 @@
 """DB access for cached tracking results - the single cache source of truth
 shared by every provider (browser-based and HTTP-based alike), replacing the
 on-disk JSON caches the HTTP providers used to keep separately.
+
+Unchanged, moved verbatim from the old top-level app/repositories.py during
+the production-backend rework: app/services/bulk_tracking_service.py and
+app/services/tracking_service.py (and transitively the untouched
+app/routers/searates_debug.py) depend on this exact class/behavior.
 """
 
 from __future__ import annotations
@@ -10,7 +15,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from .models import ContainerResult
+from ..models.container import ContainerResult
 
 
 class ContainerResultRepository:

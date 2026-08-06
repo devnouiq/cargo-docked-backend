@@ -1,3 +1,11 @@
+"""Pre-rework request/response models - unchanged, moved verbatim from the
+old top-level app/schemas.py. Still used by app/routers/searates_debug.py
+(untouched behavior) and the deprecated `/v1/track*` aliases in
+app/routers/tracking.py.
+"""
+
+from __future__ import annotations
+
 from typing import List, Optional
 
 from pydantic import BaseModel

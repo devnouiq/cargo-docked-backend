@@ -14,6 +14,8 @@ RUN uv sync --frozen --no-install-project --no-dev
 
 COPY app ./app
 COPY scripts ./scripts
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 RUN uv sync --frozen --no-dev
 
@@ -22,5 +24,8 @@ ENV PATH="/app/.venv/bin:$PATH"
 EXPOSE 8080
 
 # Cloud Run injects $PORT (defaults to 8080 locally); no brackets on CMD
-# means Docker runs this via a shell, so the ${PORT:-8080} expansion works.
-CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}
+# means Docker runs this via a shell, so the ${PORT:-8080} and migrate-then-serve
+# sequencing work. Fine for a single-instance deploy; a multi-replica rollout
+# should run `alembic upgrade head` as its own release step instead of letting
+# every replica race to migrate on boot - see CLAUDE.md "Deploying".
+CMD alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}

@@ -1,69 +1,80 @@
-import asyncio
+"""Deprecated aliases for the pre-rework `/v1/track*` paths.
+
+Superseded by the standardized `/v1/containers` resource routes
+(routers/v1/containers.py), but kept mounted and working - not removed -
+per the "standardize the naming, don't break existing integrations"
+brief. New integrations should use `/v1/containers`; these are marked
+`deprecated=True` so they still show up (crossed out) in the generated
+API docs instead of disappearing silently.
+"""
+
+from __future__ import annotations
+
 import logging
-import time
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from .. import models
-from ..database import get_db
-from ..dependencies import get_api_key
-from ..providers.track_trace_browser import scrape_container
-from ..schemas import TrackRequest, TrackResponse
-from ..services.tracking_service import get_or_track
+from ..core.errors import AppError, NotFoundError
+from ..db.session import get_db
+from ..dependencies import ApiKeyPrincipal, get_api_key_principal
+from ..schemas import BulkTrackRequest, TrackRequest, TrackResponse
+from ..services.container_service import ContainerService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", tags=["tracking"])
+router = APIRouter(prefix="/v1", tags=["tracking (deprecated)"])
+_service = ContainerService()
 
 
-@router.post("/track", response_model=List[TrackResponse])
-async def track_containers(request: TrackRequest, customer: models.Customer = Depends(get_api_key), db: Session = Depends(get_db)):
-    batch_start = time.perf_counter()
-
-    if customer.requests_today + len(request.container_numbers) > customer.daily_limit:
-        raise HTTPException(status_code=429, detail="Daily request limit exceeded")
-
-    customer.requests_today += len(request.container_numbers)
-    db.commit()
-
-    results = await asyncio.gather(*[
-        get_or_track(db, number, scrape_container) for number in request.container_numbers
-    ])
-
-    batch_elapsed = time.perf_counter() - batch_start
-    logger.info(f"/v1/track batch of {len(request.container_numbers)} completed in {batch_elapsed:.2f}s total")
-
-    return [TrackResponse(**r) for r in results]
+def _to_track_response(container) -> TrackResponse:
+    return TrackResponse(
+        container_number=container.container_number,
+        status=container.status or "unknown",
+        location=container.last_known_location,
+        raw_data=container.raw_data,
+        cached=False,
+        duration_seconds=None,
+    )
 
 
-@router.get("/track/{number}", response_model=TrackResponse)
-async def track_single(number: str, customer: models.Customer = Depends(get_api_key), db: Session = Depends(get_db)):
-    request_start = time.perf_counter()
-    if customer.requests_today + 1 > customer.daily_limit:
-        raise HTTPException(status_code=429, detail="Daily request limit exceeded")
+@router.post("/track", response_model=List[TrackResponse], deprecated=True)
+async def track_containers(
+    request: TrackRequest, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db: Session = Depends(get_db)
+):
+    """Deprecated: use `POST /v1/containers/bulk`."""
+    results = []
+    for number in request.container_numbers:
+        try:
+            container = await _service.track(
+                db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
+            )
+            results.append(_to_track_response(container))
+        except AppError as exc:
+            results.append(TrackResponse(container_number=number, status="error", location=None, raw_data={"error": exc.detail}))
+    return results
 
-    customer.requests_today += 1
-    db.commit()
 
-    result = await get_or_track(db, number, scrape_container)
+@router.get("/track/{number}", response_model=TrackResponse, deprecated=True)
+async def track_single(number: str, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db: Session = Depends(get_db)):
+    """Deprecated: use `GET /v1/containers/{number}`. Unlike the new route,
+    this one auto-registers tracking on first call (the old `/v1/track`
+    had no separate "start tracking" step - every number was trackable via
+    a single GET)."""
+    try:
+        container = await _service.get_or_refresh(
+            db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
+        )
+    except NotFoundError:
+        container = await _service.track(
+            db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
+        )
+    return _to_track_response(container)
 
-    logger.info(f"/v1/track/{number} completed in {time.perf_counter() - request_start:.3f}s (cached={result['cached']})")
-    return TrackResponse(**result)
 
-
-@router.get("/providers")
-async def get_providers(customer: models.Customer = Depends(get_api_key)):
-    # This would typically be a dynamic list or queried from a DB table
-    # For now, returning a static list of embedded providers
-    return {
-        "providers": [
-            "MSC",
-            "Maersk",
-            "CMA CGM",
-            "Hapag-Lloyd",
-            "ONE",
-            "Evergreen"
-        ]
-    }
+@router.get("/providers", deprecated=True)
+async def get_providers(principal: ApiKeyPrincipal = Depends(get_api_key_principal)):
+    """Deprecated, informational only - the provider registry
+    (providers/registry.py) now decides per-container which source to use."""
+    return {"providers": _service.registry.provider_names}
