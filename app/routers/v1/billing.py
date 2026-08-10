@@ -73,7 +73,12 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
         return {"received": False}
 
     if event["type"] in ("customer.subscription.created", "customer.subscription.updated"):
-        stripe_subscription = event["data"]["object"]
+        # event["data"]["object"] is a stripe.StripeObject, not a plain
+        # dict - its __getattr__ routes unknown attributes (including
+        # "get") through __getitem__, so dict.get(...) is not available
+        # and raises AttributeError. to_dict() recursively converts it
+        # (and nested objects like "metadata") into real dicts first.
+        stripe_subscription = event["data"]["object"].to_dict()
         organization_id = stripe_subscription.get("metadata", {}).get("organization_id") or stripe_subscription.get(
             "client_reference_id"
         )

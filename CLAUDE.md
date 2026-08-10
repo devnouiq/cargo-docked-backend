@@ -196,11 +196,54 @@ When adding a subsystem, add tests the same way: hit the HTTP layer via
   `app/models/webhook.py` for why (we need the raw value to sign every
   delivery, unlike a bearer credential we only ever compare against).
 
+## Local dev with real OAuth/Stripe credentials
+
+The frontend repo's own `CLAUDE.md`/`STATE.md` track what's currently
+configured. Notes specific to *this* backend if you're setting it up
+fresh:
+
+- **OAuth**: register a Google Cloud OAuth client and a GitHub OAuth App,
+  each with redirect URI `{OAUTH_REDIRECT_BASE_URL}/v1/auth/oauth/{provider}/callback`
+  (must match exactly). Google apps in "Testing" publish status only let
+  explicitly-added test-user accounts log in.
+- **Stripe**: get test-mode `sk_test_.../pk_test_...` from the dashboard
+  (toggle "Test mode" on first - live-mode keys exist by default on any
+  account regardless of activation status, they're just inert). For each
+  paid `Plan` row, create a real Stripe Price (`stripe prices create
+  --product=... --unit-amount=... --currency=... --recurring.interval=month`)
+  and set it as the product's `default_price` before archiving any old
+  price (Stripe refuses to archive a product's current default price).
+  Write the resulting `price_...` ID into `plans.stripe_price_id`
+  directly - no admin endpoint for this.
+- **Stripe webhook secret**: for local dev, use the Stripe CLI
+  (`stripe listen --forward-to localhost:8000/v1/billing/webhook`) rather
+  than a Dashboard-created webhook endpoint - Stripe's servers can't
+  reach `localhost` directly, and the CLI forwards real test-mode events
+  without needing one. Must stay running for webhook-driven subscription
+  sync to work (checkout/portal redirects work fine without it).
+- **Two real webhook bugs were found and fixed via a real Stripe
+  checkout, not code review alone** - worth knowing if you touch
+  `services/billing_service.py` or `routers/v1/billing.py` again:
+  1. `create_checkout_session` originally set `client_reference_id`/
+     `metadata` only on the Checkout *Session* - Stripe does not copy
+     those onto the resulting *Subscription* object, which is what the
+     webhook handler reads. Fixed by also passing
+     `subscription_data={"metadata": {...}}`.
+  2. The webhook handler called `.get(...)` on a raw `stripe.StripeObject`
+     (from `event["data"]["object"]`), which doesn't support dict-style
+     `.get()` via attribute access in the installed SDK version - crashed
+     every subscription webhook with a 500. Fixed with `.to_dict()`
+     before any `.get()` calls. **If you add new webhook event handling,
+     call `.to_dict()` on the event's data object first** - don't assume
+     it behaves like a plain dict.
+  3. `tests/conftest.py` now force-blanks `STRIPE_SECRET_KEY` (in
+     addition to `DATABASE_URL`/`JWT_SECRET`/etc.) - `Settings` reads the
+     real `.env` file directly via `SettingsConfigDict(env_file=...)`, so
+     a real key sitting in `.env` for local live-testing was leaking into
+     the test process and breaking the "Stripe not configured" test.
+
 ## What's deliberately not done yet (see task list this repo shipped with)
 
-- Stripe is wired for real (checkout/portal/webhook handling all work)
-  but needs live/test API keys and Stripe Price IDs (`Plan.stripe_price_id`)
-  to actually activate - see `.env.example` and `services/billing_service.py`.
 - OAuth needs real Google/GitHub app credentials per environment.
 - The provider registry wraps existing scrapers only; a paid aggregator
   (Terminal49/Vizion/project44) is a drop-in adapter away (see above) but

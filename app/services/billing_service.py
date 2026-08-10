@@ -74,6 +74,14 @@ class BillingService:
             customer=subscription.stripe_customer_id if subscription else None,
             client_reference_id=str(organization_id),
             metadata={"organization_id": str(organization_id), "plan_code": plan_code},
+            # Stripe does NOT copy the Checkout Session's client_reference_id/
+            # metadata onto the Subscription object it creates - the webhook
+            # handler reads organization_id off the *subscription*
+            # (upsert_subscription_from_stripe_object, keyed by
+            # subscription.items.data[0].price.id), so that mapping has to be
+            # set here too or every subscription.* webhook after the first
+            # checkout is unattributable.
+            subscription_data={"metadata": {"organization_id": str(organization_id), "plan_code": plan_code}},
         )
         return session.url
 

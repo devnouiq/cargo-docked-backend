@@ -42,6 +42,13 @@ os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", "sqlite:///./te
 os.environ.setdefault("JWT_SECRET", "test-only-secret-not-for-production-use")
 os.environ.setdefault("WEBHOOK_SIGNING_SECRET", "test-only-webhook-secret-not-for-production-use")
 os.environ.setdefault("CORS_ALLOW_ORIGINS", '["http://testserver"]')
+# Settings reads the real .env file directly (see core/config.py's
+# SettingsConfigDict(env_file=...)), not just os.environ - so a real
+# STRIPE_SECRET_KEY sitting in .env (for local live testing) would
+# otherwise leak into the test process and break tests that assert the
+# "Stripe not configured" 503 path. Force it blank here regardless of
+# what .env has, same reasoning as the vars above.
+os.environ["STRIPE_SECRET_KEY"] = ""
 
 import pytest
 from fastapi.testclient import TestClient
