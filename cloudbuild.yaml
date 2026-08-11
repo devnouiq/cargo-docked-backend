@@ -31,7 +31,7 @@ steps:
       - '--all-tags'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/cargotrack/api'
 
-  - name: 'gcr.io/google-cloud-sdk/slim'
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: deploy-api
     entrypoint: gcloud
     args:
@@ -52,7 +52,7 @@ steps:
         STRIPE_SECRET_KEY=stripe-secret-key:latest,STRIPE_WEBHOOK_SECRET=stripe-webhook-secret:latest,
         OXYLABS_PROXY_PASSWORD=oxylabs-proxy-password:latest
 
-  - name: 'gcr.io/google-cloud-sdk/slim'
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     id: deploy-worker
     entrypoint: gcloud
     args:
