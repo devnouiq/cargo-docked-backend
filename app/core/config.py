@@ -52,8 +52,6 @@ class Settings(BaseSettings):
     # --- OAuth ---------------------------------------------------------------
     google_client_id: str | None = None
     google_client_secret: str | None = None
-    github_client_id: str | None = None
-    github_client_secret: str | None = None
     # Where OAuth providers redirect back to after consent, e.g.
     # https://api.example.com/v1/auth/oauth/{provider}/callback
     oauth_redirect_base_url: str = "http://localhost:8000"

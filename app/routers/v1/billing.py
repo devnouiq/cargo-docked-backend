@@ -16,6 +16,8 @@ from ...dependencies import CurrentSession, get_current_session
 from ...schemas.billing import (
     CheckoutSessionRequest,
     CheckoutSessionResponse,
+    InvoiceOut,
+    PaymentMethodOut,
     PlanOut,
     PortalSessionRequest,
     PortalSessionResponse,
@@ -39,6 +41,16 @@ def get_subscription(session: CurrentSession = Depends(get_current_session), db=
     if subscription is None:
         raise NotFoundError("This organization has no subscription yet (still on the default Free allotment).")
     return SubscriptionOut(plan_code=subscription.plan.code, status=subscription.status, current_period_end=subscription.current_period_end)
+
+
+@router.get("/invoices", response_model=list[InvoiceOut])
+def list_invoices(session: CurrentSession = Depends(get_current_session), db=Depends(get_db)):
+    return _service.list_invoices(db, organization_id=session.organization.id)
+
+
+@router.get("/payment-method", response_model=PaymentMethodOut | None)
+def get_payment_method(session: CurrentSession = Depends(get_current_session), db=Depends(get_db)):
+    return _service.get_payment_method(db, organization_id=session.organization.id)
 
 
 @router.post("/checkout-session", response_model=CheckoutSessionResponse)

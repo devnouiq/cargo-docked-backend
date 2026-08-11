@@ -41,6 +41,19 @@ def test_portal_session_without_stripe_configured_returns_503(client, signed_up_
     assert resp.status_code == 503
 
 
+def test_invoices_without_stripe_configured_returns_503(client, signed_up_org):
+    _tokens, headers = signed_up_org
+    resp = client.get("/v1/billing/invoices", headers=headers)
+    assert resp.status_code == 503
+    assert resp.json()["code"] == "feature_not_configured"
+
+
+def test_payment_method_without_stripe_configured_returns_503(client, signed_up_org):
+    _tokens, headers = signed_up_org
+    resp = client.get("/v1/billing/payment-method", headers=headers)
+    assert resp.status_code == 503
+
+
 def test_billing_routes_require_a_session(client):
     resp = client.get("/v1/billing/subscription")
     assert resp.status_code == 401

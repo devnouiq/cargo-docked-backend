@@ -78,8 +78,8 @@ curl -X POST http://localhost:8000/v1/api-keys -H "Authorization: Bearer $ACCESS
 # -> {"api_key": "ctk_live_...", ...}  (shown once)
 ```
 
-Google/GitHub OAuth is available via `GET /v1/auth/oauth/{provider}/authorize`
-once `GOOGLE_CLIENT_ID`/`GITHUB_CLIENT_ID` (+ secrets) are set in `.env`.
+Google OAuth is available via `GET /v1/auth/oauth/{provider}/authorize`
+once `GOOGLE_CLIENT_ID` (+ secret) is set in `.env`.
 
 ## Testing
 

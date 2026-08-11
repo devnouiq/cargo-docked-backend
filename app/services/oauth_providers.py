@@ -1,4 +1,4 @@
-"""Minimal OAuth2 authorization-code client for Google/GitHub - just enough
+"""Minimal OAuth2 authorization-code client for Google - just enough
 (authorize URL, code-for-token exchange, userinfo fetch) to run login;
 no third-party OAuth SDK dependency for something this small and stable.
 """
@@ -39,14 +39,6 @@ _CONFIGS: dict[OAuthProvider, OAuthProviderConfig] = {
         scope="openid email profile",
         client_id=settings.google_client_id,
         client_secret=settings.google_client_secret,
-    ),
-    OAuthProvider.GITHUB: OAuthProviderConfig(
-        authorize_url="https://github.com/login/oauth/authorize",
-        token_url="https://github.com/login/oauth/access_token",
-        userinfo_url="https://api.github.com/user",
-        scope="read:user user:email",
-        client_id=settings.github_client_id,
-        client_secret=settings.github_client_secret,
     ),
 }
 
@@ -106,19 +98,4 @@ async def fetch_identity(provider: OAuthProvider, *, access_token: str) -> OAuth
         response.raise_for_status()
         data = response.json()
 
-        if provider is OAuthProvider.GOOGLE:
-            return OAuthIdentityInfo(provider_account_id=data["sub"], email=data.get("email"), name=data.get("name"))
-
-        # GitHub: /user omits `email` when the user hasn't made one public -
-        # fall back to /user/emails and take the primary (or first) address.
-        email = data.get("email")
-        if not email:
-            emails_response = await client.get("https://api.github.com/user/emails", headers=headers)
-            if emails_response.status_code == 200:
-                emails = emails_response.json()
-                email = next((e["email"] for e in emails if e.get("primary")), None) or (
-                    emails[0]["email"] if emails else None
-                )
-        return OAuthIdentityInfo(
-            provider_account_id=str(data["id"]), email=email, name=data.get("name") or data.get("login")
-        )
+    return OAuthIdentityInfo(provider_account_id=data["sub"], email=data.get("email"), name=data.get("name"))

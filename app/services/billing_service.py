@@ -14,6 +14,7 @@ app/models/billing.py.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import stripe
 from sqlalchemy.orm import Session
@@ -46,6 +47,17 @@ def seed_default_plans(db: Session) -> None:
         if existing is None:
             db.add(Plan(**plan_data))
     db.commit()
+
+
+def _describe_invoice(invoice: "stripe.Invoice") -> str:
+    """Stripe invoices have no single human-readable label - derive one
+    from the first line item's description, falling back to the
+    machine-readable `billing_reason` (e.g. "subscription_cycle")."""
+    lines = invoice.lines.data if invoice.lines else []
+    if lines and lines[0].description:
+        return lines[0].description
+    reason = (invoice.billing_reason or "").replace("_", " ").strip()
+    return reason.capitalize() if reason else f"Invoice {invoice.number or invoice.id}"
 
 
 class BillingService:
@@ -85,13 +97,58 @@ class BillingService:
         )
         return session.url
 
-    def create_billing_portal_session(self, db: Session, *, organization_id: uuid.UUID, return_url: str) -> str:
-        _require_stripe()
+    def _require_customer_id(self, db: Session, organization_id: uuid.UUID) -> str:
         subscription = self.get_subscription(db, organization_id)
         if subscription is None or not subscription.stripe_customer_id:
             raise NotFoundError("No billing account found for this organization yet.")
-        session = stripe.billing_portal.Session.create(customer=subscription.stripe_customer_id, return_url=return_url)
+        return subscription.stripe_customer_id
+
+    def create_billing_portal_session(self, db: Session, *, organization_id: uuid.UUID, return_url: str) -> str:
+        _require_stripe()
+        customer_id = self._require_customer_id(db, organization_id)
+        session = stripe.billing_portal.Session.create(customer=customer_id, return_url=return_url)
         return session.url
+
+    def list_invoices(self, db: Session, *, organization_id: uuid.UUID, limit: int = 12) -> list[dict]:
+        _require_stripe()
+        customer_id = self._require_customer_id(db, organization_id)
+        invoices = stripe.Invoice.list(customer=customer_id, limit=limit)
+        return [
+            {
+                "id": inv.id,
+                "number": inv.number,
+                "description": _describe_invoice(inv),
+                "status": inv.status,
+                "amount_cents": inv.total,
+                "currency": inv.currency,
+                "created_at": datetime.fromtimestamp(inv.created, tz=timezone.utc),
+                "hosted_invoice_url": inv.hosted_invoice_url,
+                "invoice_pdf": inv.invoice_pdf,
+            }
+            for inv in invoices.data
+        ]
+
+    def get_payment_method(self, db: Session, *, organization_id: uuid.UUID) -> dict | None:
+        _require_stripe()
+        customer_id = self._require_customer_id(db, organization_id)
+        # `.to_dict()` first, not `.get()` on the raw StripeObject - see the
+        # webhook handler's note in CLAUDE.md, same SDK quirk applies here.
+        customer = stripe.Customer.retrieve(
+            customer_id, expand=["invoice_settings.default_payment_method"]
+        ).to_dict()
+        payment_method = customer.get("invoice_settings", {}).get("default_payment_method")
+        if payment_method is None:
+            methods = stripe.PaymentMethod.list(customer=customer_id, type="card")
+            payment_method = methods.data[0].to_dict() if methods.data else None
+        if payment_method is None or payment_method.get("card") is None:
+            return None
+        card = payment_method["card"]
+        return {
+            "brand": card["brand"],
+            "last4": card["last4"],
+            "exp_month": card["exp_month"],
+            "exp_year": card["exp_year"],
+        }
 
     def construct_webhook_event(self, *, payload: bytes, signature: str) -> "stripe.Event":
         if not settings.stripe_webhook_secret:

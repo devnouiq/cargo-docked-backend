@@ -1,4 +1,4 @@
-"""Account auth: email+password and OAuth (Google/GitHub), JWT session
+"""Account auth: email+password and OAuth (Google), JWT session
 issuance/refresh/logout. Dashboard-facing - see routers/v1/__init__.py's
 module docstring for the JWT-vs-API-key split rationale.
 """

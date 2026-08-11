@@ -36,3 +36,22 @@ class SubscriptionOut(BaseModel):
     plan_code: str
     status: SubscriptionStatus
     current_period_end: datetime | None
+
+
+class InvoiceOut(BaseModel):
+    id: str
+    number: str | None
+    description: str
+    status: str
+    amount_cents: int
+    currency: str
+    created_at: datetime
+    hosted_invoice_url: str | None
+    invoice_pdf: str | None
+
+
+class PaymentMethodOut(BaseModel):
+    brand: str
+    last4: str
+    exp_month: int
+    exp_year: int

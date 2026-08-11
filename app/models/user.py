@@ -1,4 +1,4 @@
-"""A User authenticates via OAuth (Google/GitHub - `OAuthIdentity`) and/or
+"""A User authenticates via OAuth (Google - `OAuthIdentity`) and/or
 email+password (`hashed_password`, nullable for OAuth-only accounts).
 """
 
@@ -16,7 +16,6 @@ from .mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 class OAuthProvider(enum.StrEnum):
     GOOGLE = "google"
-    GITHUB = "github"
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -34,7 +33,6 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class OAuthIdentity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """One linked external identity per (provider, provider_account_id) -
-    lets a user link both Google and GitHub to the same account, and
     prevents two different users from claiming the same external identity.
     """
 

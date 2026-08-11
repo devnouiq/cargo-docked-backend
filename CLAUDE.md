@@ -202,9 +202,9 @@ The frontend repo's own `CLAUDE.md`/`STATE.md` track what's currently
 configured. Notes specific to *this* backend if you're setting it up
 fresh:
 
-- **OAuth**: register a Google Cloud OAuth client and a GitHub OAuth App,
-  each with redirect URI `{OAUTH_REDIRECT_BASE_URL}/v1/auth/oauth/{provider}/callback`
-  (must match exactly). Google apps in "Testing" publish status only let
+- **OAuth**: register a Google Cloud OAuth client with redirect URI
+  `{OAUTH_REDIRECT_BASE_URL}/v1/auth/oauth/google/callback` (must match
+  exactly). Google apps in "Testing" publish status only let
   explicitly-added test-user accounts log in.
 - **Stripe**: get test-mode `sk_test_.../pk_test_...` from the dashboard
   (toggle "Test mode" on first - live-mode keys exist by default on any
@@ -244,7 +244,7 @@ fresh:
 
 ## What's deliberately not done yet (see task list this repo shipped with)
 
-- OAuth needs real Google/GitHub app credentials per environment.
+- OAuth needs real Google app credentials per environment.
 - The provider registry wraps existing scrapers only; a paid aggregator
   (Terminal49/Vizion/project44) is a drop-in adapter away (see above) but
   not implemented, since no such account/credentials exist yet.
