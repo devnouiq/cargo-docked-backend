@@ -20,7 +20,12 @@ if config.config_file_name is not None:
 
 # Single source of truth for the DB URL: app.core.config.settings, not a
 # second copy living in alembic.ini - see the comment left there.
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# set_main_option() writes through configparser, which treats a bare `%`
+# as the start of interpolation syntax - a percent-encoded password (e.g.
+# from a URL-unsafe character) crashes it unless every literal `%` is
+# escaped as `%%` first. get_main_option()/get_section() below resolve
+# that escaping back down to a single `%`, so this round-trips correctly.
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
