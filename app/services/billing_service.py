@@ -25,14 +25,19 @@ from ..models.billing import Plan, Subscription, SubscriptionStatus
 
 # The plans this product ships with. Seeded via `seed_default_plans()`
 # (called from scripts/init_db.py) - `stripe_price_id` is left None until
-# real Stripe Price objects are created and wired in via env/DB update;
-# Free needs no Stripe object at all.
-DEFAULT_PLANS: list[dict] = [
-    {"code": "free", "name": "Free", "monthly_price_cents": 0, "included_credits": 1_000},
-    {"code": "starter", "name": "Starter", "monthly_price_cents": 4_900, "included_credits": 10_000},
-    {"code": "growth", "name": "Growth", "monthly_price_cents": 19_900, "included_credits": 50_000},
-    {"code": "enterprise", "name": "Enterprise", "monthly_price_cents": 0, "included_credits": 500_000},
-]
+# real Stripe Price objects are created and wired in via env; Free needs
+# no Stripe object at all, Enterprise is negotiated manually. Starter/
+# Growth prices come from settings, not a literal string here, because
+# every environment (local dev, staging, prod) has its own Stripe
+# account with its own Price IDs - see STRIPE_STARTER_PRICE_ID/
+# STRIPE_GROWTH_PRICE_ID in .env.example.
+def _default_plans() -> list[dict]:
+    return [
+        {"code": "free", "name": "Free", "monthly_price_cents": 0, "included_credits": 1_000},
+        {"code": "starter", "name": "Starter", "monthly_price_cents": 4_900, "included_credits": 10_000, "stripe_price_id": settings.stripe_starter_price_id},
+        {"code": "growth", "name": "Growth", "monthly_price_cents": 19_900, "included_credits": 50_000, "stripe_price_id": settings.stripe_growth_price_id},
+        {"code": "enterprise", "name": "Enterprise", "monthly_price_cents": 0, "included_credits": 500_000},
+    ]
 
 
 def _require_stripe() -> None:
@@ -42,7 +47,7 @@ def _require_stripe() -> None:
 
 
 def seed_default_plans(db: Session) -> None:
-    for plan_data in DEFAULT_PLANS:
+    for plan_data in _default_plans():
         existing = db.query(Plan).filter_by(code=plan_data["code"]).one_or_none()
         if existing is None:
             db.add(Plan(**plan_data))

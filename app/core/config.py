@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     stripe_secret_key: str | None = None
     stripe_webhook_secret: str | None = None
     stripe_publishable_key: str | None = None
+    # Price IDs for the two paid plans - per-environment (each Stripe
+    # account, test or live, has its own), not a literal constant. None
+    # until set, matching stripe_price_id's existing nullable contract.
+    stripe_starter_price_id: str | None = None
+    stripe_growth_price_id: str | None = None
 
     # --- webhooks ------------------------------------------------------------
     webhook_signing_secret: str = "dev-only-webhook-secret-change-me"

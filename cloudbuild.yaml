@@ -45,7 +45,7 @@ steps:
       - '--add-cloudsql-instances=$PROJECT_ID:us-central1:cargotrack-db'
       - '--network=default'
       - '--vpc-egress=private-ranges-only'
-      - '--set-env-vars=ENV=production,LOG_LEVEL=INFO,OAUTH_REDIRECT_BASE_URL=https://cargotrack-api-34343163556.us-central1.run.app,FRONTEND_BASE_URL=https://cargotrack.vercel.app,CORS_ALLOW_ORIGINS=["https://cargotrack.vercel.app"],GOOGLE_CLIENT_ID=236706222261-8tt1troe1hms4cmsa91vulvbd8153vnv.apps.googleusercontent.com,OXYLABS_PROXY_HOST=pr.oxylabs.io:7777,OXYLABS_PROXY_USERNAME=customer-DataDocked2026_KmjsA'
+      - '--set-env-vars=ENV=production,LOG_LEVEL=INFO,OAUTH_REDIRECT_BASE_URL=https://cargotrack-api-34343163556.us-central1.run.app,FRONTEND_BASE_URL=https://cargotrack.vercel.app,CORS_ALLOW_ORIGINS=["https://cargotrack.vercel.app"],GOOGLE_CLIENT_ID=34343163556-mf0ud0lhvgsi0limqu5el8hlhg37lm71.apps.googleusercontent.com,OXYLABS_PROXY_HOST=pr.oxylabs.io:7777,OXYLABS_PROXY_USERNAME=customer-DataDocked2026_KmjsA'
       - >-
         --set-secrets=DATABASE_URL=database-url:latest,REDIS_URL=redis-url:latest,
         JWT_SECRET=jwt-secret:latest,GOOGLE_CLIENT_SECRET=google-client-secret:latest,
