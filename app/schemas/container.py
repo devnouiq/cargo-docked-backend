@@ -5,6 +5,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..models.container import ContainerScrapeStatus
+
 
 class ContainerCreateRequest(BaseModel):
     container_number: str = Field(min_length=4, max_length=30)
@@ -45,6 +47,9 @@ class ContainerOut(BaseModel):
     last_free_day: datetime | None
     is_active: bool
     last_polled_at: datetime | None
+    # Our own scrape lifecycle - not the carrier's `status` above.
+    scrape_status: ContainerScrapeStatus
+    scrape_error: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -62,3 +67,5 @@ class ContainerBulkResultItem(BaseModel):
 
 class ContainerBulkResponse(BaseModel):
     results: list[ContainerBulkResultItem]
+    queued: int  # accepted and handed to the worker
+    rejected: int  # refused up front (quota, validation) - never scraped

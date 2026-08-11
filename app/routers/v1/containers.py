@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from ...core.errors import AppError, NotFoundError
+from ...core.errors import NotFoundError
 from ...db.session import get_db
 from ...dependencies import ApiKeyPrincipal, get_api_key_principal
 from ...schemas.common import Page, PageParams
@@ -53,28 +53,41 @@ async def start_tracking(
     )
 
 
-@router.post("/bulk", response_model=ContainerBulkResponse)
+@router.post("/bulk", response_model=ContainerBulkResponse, status_code=202)
 async def start_tracking_bulk(
     payload: ContainerBulkCreateRequest, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db=Depends(get_db)
 ):
-    async def _track_one(number: str) -> ContainerBulkResultItem:
-        try:
-            container = await _service.track(
-                db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
-            )
-            return ContainerBulkResultItem(container_number=number, ok=True, container=container)
-        except AppError as exc:
-            return ContainerBulkResultItem(container_number=number, ok=False, error=exc.detail)
-        except Exception as exc:  # noqa: BLE001 - isolate one item's failure from the rest of the batch
-            return ContainerBulkResultItem(container_number=number, ok=False, error=str(exc))
+    """Queue a batch of containers for tracking. **Accepted, not completed.**
 
-    # Sequential, not gather: every call shares `db` (one SQLAlchemy
-    # Session, not safe for concurrent use across coroutines) and hits the
-    # same org's credit balance row - concurrent UPDATEs there would just
-    # serialize at the DB anyway. Bulk throughput comes from
-    # providers/registry.py's own concurrency, not from parallelizing here.
-    results = [await _track_one(number) for number in payload.container_numbers]
-    return ContainerBulkResponse(results=results)
+    This endpoint returns as soon as the containers are registered and
+    charged - it does not wait for the carrier data. Each returned container
+    comes back with `scrape_status: "queued"` and `status: null`; a
+    background worker resolves them shortly afterwards.
+
+    To get results, either poll `GET /v1/containers/{number}` until
+    `scrape_status` is terminal (`succeeded`, `no_data` or `failed`), or
+    subscribe to the `container.updated` webhook.
+
+    Duplicate numbers within one payload are collapsed: one row, one credit,
+    one job. `queued` counts the containers accepted, `rejected` those
+    refused up front (e.g. insufficient credits) - a rejected item has
+    `ok: false` and an `error`, and is never scraped.
+    """
+    results = await _service.queue_bulk(
+        db,
+        organization_id=principal.organization.id,
+        api_key_id=principal.api_key.id,
+        container_numbers=payload.container_numbers,
+    )
+    items = [
+        ContainerBulkResultItem(container_number=number, ok=container is not None, container=container, error=error)
+        for number, container, error in results
+    ]
+    return ContainerBulkResponse(
+        results=items,
+        queued=sum(1 for item in items if item.ok),
+        rejected=sum(1 for item in items if not item.ok),
+    )
 
 
 @router.get("/{number}", response_model=ContainerDetailOut)
@@ -82,6 +95,22 @@ async def get_container(
     number: str, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db=Depends(get_db)
 ):
     return await _service.get_or_refresh(
+        db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
+    )
+
+
+@router.post("/{number}/refresh", response_model=ContainerOut, status_code=202)
+async def refresh_container(
+    number: str, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db=Depends(get_db)
+):
+    """Queue a fresh scrape of an already-tracked container.
+
+    Returns immediately with `scrape_status: "queued"`; the worker does the
+    actual lookup. Charges one credit - except when a scrape is already
+    pending (`queued`/`in_progress`), in which case the existing container
+    is returned unchanged and nothing is charged or re-queued.
+    """
+    return await _service.request_refresh(
         db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
     )
 

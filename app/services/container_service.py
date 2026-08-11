@@ -2,10 +2,17 @@
 resolve the container through the provider registry, persist the result,
 and notify webhooks when something meaningful changed.
 
-Both `track()` (a direct API call/POST) and `refresh_and_notify()` (called
-by the arq poller on its own schedule) end at the same `_apply_result`
-step, so "a customer looked it up" and "the background poller checked it"
-produce identical downstream behavior (persisted state + webhook events).
+`track()` (a direct API call/POST), `refresh_and_notify()` (the arq
+poller's schedule) and `process_queued_scrape()` (the `scrape_container`
+job queued by `queue_bulk()`/`request_refresh()`) all end at the same
+`_refresh_and_apply` step, so "a customer looked it up", "the background
+poller checked it" and "the worker drained the queue" produce identical
+downstream behavior - persisted state, `scrape_status` transitions and
+webhook events alike.
+
+The one thing that differs between them is billing: the API layer charges
+at submission time, so the worker path must charge nothing (see
+`_process_in_own_session`'s `charge_event_type`).
 """
 
 from __future__ import annotations
@@ -17,14 +24,15 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
-from ..core.errors import NotFoundError
+from ..core.errors import AppError, NotFoundError
 from ..db.session import SessionLocal
-from ..models.container import TrackedContainer
+from ..models.container import ContainerScrapeStatus, TrackedContainer
 from ..models.usage import UsageEventType
 from ..models.webhook import WebhookEventType
 from ..providers.base import NormalizedTrackingResult
 from ..providers.registry import ProviderRegistry, build_default_registry
 from ..repositories.containers import ContainerRepository
+from ..workers.redis_pool import get_arq_pool
 from .usage_service import UsageService
 from .webhook_service import WebhookService
 
@@ -130,36 +138,190 @@ class ContainerService:
             last_polled_at = last_polled_at.replace(tzinfo=timezone.utc)
         return datetime.now(timezone.utc) - last_polled_at > timedelta(seconds=settings.container_cache_ttl_seconds)
 
+    async def queue_bulk(
+        self,
+        db: Session,
+        *,
+        organization_id: uuid.UUID,
+        api_key_id: uuid.UUID | None,
+        container_numbers: list[str],
+    ) -> list[tuple[str, TrackedContainer | None, str | None]]:
+        """Async entry point for `POST /v1/containers/bulk`: create the rows,
+        charge for them, hand the actual scraping to the arq worker.
+
+        Returns one `(container_number, container_or_None, error_or_None)`
+        tuple per *unique* number, in submission order.
+
+        De-duplication happens before any charging: the same number twice in
+        one payload is one row, one credit, one job.
+        """
+        numbers = list(dict.fromkeys(n.strip().upper() for n in container_numbers))
+
+        results: list[tuple[str, TrackedContainer | None, str | None]] = []
+        queued: list[TrackedContainer] = []
+        for number in numbers:
+            try:
+                # Charge before create, matching track()'s ordering: a
+                # quota-exhausted org must not get a free row.
+                self.usage.charge(
+                    db,
+                    organization_id=organization_id,
+                    api_key_id=api_key_id,
+                    event_type=UsageEventType.CONTAINER_LOOKUP,
+                    container_number=number,
+                )
+                container, _created = self.containers.get_or_create(
+                    db, organization_id=organization_id, container_number=number
+                )
+                container.scrape_status = ContainerScrapeStatus.QUEUED
+                container.scrape_error = None
+                db.commit()
+            except AppError as exc:  # quota exceeded, etc - isolate this item
+                db.rollback()
+                results.append((number, None, exc.detail))
+                continue
+            except Exception as exc:  # noqa: BLE001 - one item's failure must not sink the batch
+                db.rollback()
+                logger.exception("bulk: failed to queue container %s", number)
+                results.append((number, None, str(exc)))
+                continue
+            results.append((number, container, None))
+            queued.append(container)
+
+        await self._enqueue_scrapes(queued)
+        return results
+
+    async def request_refresh(
+        self, db: Session, *, organization_id: uuid.UUID, api_key_id: uuid.UUID | None, container_number: str
+    ) -> TrackedContainer:
+        """`POST /v1/containers/{number}/refresh` - queue one more scrape of
+        an already-tracked container.
+
+        Idempotent while a scrape is still pending: a double-clicked refresh
+        button (or a client re-polling) returns the row as-is rather than
+        charging a second credit and enqueueing a duplicate job.
+        """
+        container = self.containers.get_by_number(
+            db, organization_id=organization_id, container_number=container_number
+        )
+        if container is None or not container.is_active:
+            raise NotFoundError(
+                f"Container {container_number!r} is not being tracked for this organization. "
+                "POST /v1/containers to start tracking it."
+            )
+
+        if container.scrape_status in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS):
+            return container
+
+        self.usage.charge(
+            db,
+            organization_id=organization_id,
+            api_key_id=api_key_id,
+            event_type=UsageEventType.CONTAINER_LOOKUP,
+            container_number=container.container_number,
+        )
+        container.scrape_status = ContainerScrapeStatus.QUEUED
+        container.scrape_error = None
+        db.commit()
+        db.refresh(container)
+
+        await self._enqueue_scrapes([container])
+        return container
+
+    async def _enqueue_scrapes(self, containers: list[TrackedContainer]) -> None:
+        """Fire one `scrape_container` job per container, best-effort.
+
+        Same resilience shape as webhook_service.trigger(): the rows are
+        already committed, so a Redis outage here is not an error the caller
+        should ever see - the row stays `queued` and the 30-minute poller
+        sweeps it later.
+        """
+        if not containers:
+            return
+
+        pool = None
+        for container in containers:
+            try:
+                if pool is None:
+                    pool = await get_arq_pool()
+                await pool.enqueue_job("scrape_container", str(container.id))
+            except Exception:  # noqa: BLE001 - row already persisted as queued; the poller sweeps it
+                logger.warning(
+                    "failed to enqueue scrape for container %s (%s) - left queued",
+                    container.id, container.container_number, exc_info=True,
+                )
+
     async def refresh_and_notify(self, container_id: uuid.UUID) -> None:
-        """Entry point for the arq poller - opens its own session/transaction
-        so one container's failure can't roll back another's in the batch."""
+        """Entry point for the arq poller - charges a refresh credit, since
+        this is work nobody asked for at the API layer."""
+        await self._process_in_own_session(container_id, charge_event_type=UsageEventType.CONTAINER_REFRESH)
+
+    async def process_queued_scrape(self, container_id: uuid.UUID) -> None:
+        """Entry point for the `scrape_container` arq task.
+
+        Charges nothing on purpose: the API layer already charged when the
+        row was queued (queue_bulk/request_refresh). Charging here again is
+        the double-billing bug this split exists to prevent.
+        """
+        await self._process_in_own_session(container_id, charge_event_type=None)
+
+    async def _process_in_own_session(
+        self, container_id: uuid.UUID, *, charge_event_type: UsageEventType | None
+    ) -> None:
+        """Opens its own session/transaction so one container's failure can't
+        roll back another's in the same batch."""
         with SessionLocal() as db:
             container = db.get(TrackedContainer, container_id)
             if container is None or not container.is_active:
                 return
-            self.usage.charge(
-                db,
-                organization_id=container.organization_id,
-                api_key_id=None,
-                event_type=UsageEventType.CONTAINER_REFRESH,
-                container_number=container.container_number,
-            )
-            await self._refresh_and_apply(db, container)
+            if charge_event_type is not None:
+                self.usage.charge(
+                    db,
+                    organization_id=container.organization_id,
+                    api_key_id=None,
+                    event_type=charge_event_type,
+                    container_number=container.container_number,
+                )
+
+            # Commit IN_PROGRESS before the (slow) provider call so a client
+            # polling mid-scrape sees it, rather than a stale `queued`.
+            container.scrape_status = ContainerScrapeStatus.IN_PROGRESS
             db.commit()
+
+            try:
+                await self._refresh_and_apply(db, container)
+                db.commit()
+            except Exception as exc:
+                # The rollback expires `container`; re-fetch before writing
+                # the terminal status or we'd just touch a detached object.
+                db.rollback()
+                failed = db.get(TrackedContainer, container_id)
+                if failed is not None:
+                    failed.scrape_status = ContainerScrapeStatus.FAILED
+                    failed.scrape_error = str(exc)[:500]
+                    db.commit()
+                raise
 
     async def _refresh_and_apply(self, db: Session, container: TrackedContainer) -> None:
         previous_status = container.status
         result = await self.registry.track(container.container_number)
 
         if not result.ok:
+            # A provider that ran cleanly and found nothing is NO_DATA, not
+            # FAILED - "tracked, no data yet" is a normal state, and the
+            # previously-known status/location deliberately stay put.
             logger.info("no provider resolved %s: %s", container.container_number, result.error)
             container.raw_data = {**(container.raw_data or {}), "last_error": result.error}
             container.last_polled_at = datetime.now(timezone.utc)
+            container.scrape_status = ContainerScrapeStatus.NO_DATA
+            container.scrape_error = (result.error or "")[:500]
             db.flush()
             return
 
         new_events = self.containers.apply_provider_result(db, container, result=result)
         container.last_polled_at = datetime.now(timezone.utc)
+        container.scrape_status = ContainerScrapeStatus.SUCCEEDED
+        container.scrape_error = None
         db.flush()
 
         event_types = _infer_webhook_events(

@@ -14,14 +14,33 @@ is not extended further.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Enum, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..db.base import Base
 from .mixins import TimestampMixin, UUIDPrimaryKeyMixin
+
+
+class ContainerScrapeStatus(enum.StrEnum):
+    """Lifecycle of *our own* attempt to scrape a container - deliberately
+    separate from `TrackedContainer.status`, which is the carrier's own text
+    ("In Transit"). Never conflate the two.
+
+    `NO_DATA` vs `FAILED` is a product distinction, not a technical one: a
+    provider that ran cleanly and simply found nothing yet is a normal,
+    non-error outcome (the poller retries later), whereas `FAILED` is
+    reserved for the scrape job itself crashing.
+    """
+
+    QUEUED = "queued"
+    IN_PROGRESS = "in_progress"
+    SUCCEEDED = "succeeded"
+    NO_DATA = "no_data"
+    FAILED = "failed"
 
 
 class TrackedContainer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -46,6 +65,11 @@ class TrackedContainer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)  # False once DELETE /v1/containers/{n}
     raw_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    scrape_status: Mapped[ContainerScrapeStatus] = mapped_column(
+        Enum(ContainerScrapeStatus, native_enum=False, length=20), default=ContainerScrapeStatus.QUEUED, nullable=False
+    )
+    scrape_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     events: Mapped[list["ContainerEvent"]] = relationship(
         back_populates="container", cascade="all, delete-orphan", order_by="ContainerEvent.occurred_at"

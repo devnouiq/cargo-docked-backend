@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     # --- carrier poller --------------------------------------------------------
     poller_refresh_interval_minutes: int = 30
     poller_batch_size: int = 10
+    # Hard bound on one queued scrape job. The provider chain includes two
+    # browser-based fallbacks and has no timeout of its own.
+    scrape_job_timeout_s: int = 240
 
     @computed_field  # type: ignore[misc]
     @property

@@ -47,10 +47,17 @@ curl http://localhost:8000/v1/containers/MSKU1234567 -H "X-API-Key: $API_KEY"
 # Milestone timeline
 curl http://localhost:8000/v1/containers/MSKU1234567/events -H "X-API-Key: $API_KEY"
 
-# Bulk
+# Bulk - asynchronous: returns 202 immediately with every container
+# `scrape_status: "queued"` and no carrier data yet. A background worker
+# resolves them; poll GET /v1/containers/{number} until `scrape_status` is
+# terminal (succeeded/no_data/failed), or subscribe to `container.updated`.
 curl -X POST http://localhost:8000/v1/containers/bulk \
   -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
   -d '{"container_numbers": ["MSKU1234567", "ROMU2210313"]}'
+
+# Queue a fresh scrape of an already-tracked container (202, charges a credit;
+# a no-op while a scrape is already queued/in_progress)
+curl -X POST http://localhost:8000/v1/containers/MSKU1234567/refresh -H "X-API-Key: $API_KEY"
 
 # Register a webhook
 curl -X POST http://localhost:8000/v1/webhooks \
