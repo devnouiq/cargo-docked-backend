@@ -37,6 +37,19 @@ def test_list_containers_returns_tracked_items(client, api_key):
     assert {item["container_number"] for item in body["items"]} == {"MSKU1111111", "MSKU2222222"}
 
 
+def test_list_containers_orders_by_most_recently_scraped_first(client, api_key, fake_arq_pool):
+    """Re-scraping an older container should bump it back to the top of the
+    list, not leave it wherever it was originally created."""
+    client.post("/v1/containers", json={"container_number": "MSKU1111111"}, headers={"X-API-Key": api_key})
+    client.post("/v1/containers", json={"container_number": "MSKU2222222"}, headers={"X-API-Key": api_key})
+
+    refreshed = client.post("/v1/containers/MSKU1111111/refresh", headers={"X-API-Key": api_key})
+    assert refreshed.status_code == 202, refreshed.text
+
+    listed = client.get("/v1/containers", headers={"X-API-Key": api_key}).json()
+    assert [item["container_number"] for item in listed["items"]] == ["MSKU1111111", "MSKU2222222"]
+
+
 def test_stop_tracking_deactivates_and_removes_from_list(client, api_key):
     client.post("/v1/containers", json={"container_number": "MSKU3333333"}, headers={"X-API-Key": api_key})
 

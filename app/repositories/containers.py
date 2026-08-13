@@ -55,8 +55,12 @@ class ContainerRepository:
         if active_only:
             query = query.filter_by(is_active=True)
         total = query.count()
+        # Most-recently-touched first, not most-recently-created: a
+        # re-scraped container should bubble back to the top, and
+        # `updated_at` (onupdate=_utcnow) already advances on both
+        # creation and every later scrape result/refresh.
         items = (
-            query.order_by(TrackedContainer.created_at.desc()).limit(limit).offset(offset).all()
+            query.order_by(TrackedContainer.updated_at.desc()).limit(limit).offset(offset).all()
         )
         return items, total
 
