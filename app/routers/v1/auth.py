@@ -19,9 +19,11 @@ from ...db.session import get_db
 from ...dependencies import CurrentSession, get_current_session, get_current_user
 from ...models.user import OAuthProvider, User
 from ...schemas.auth import (
+    ForgotPasswordRequest,
     LoginRequest,
     OAuthAuthorizeResponse,
     RefreshRequest,
+    ResetPasswordRequest,
     SignupRequest,
     SwitchOrganizationRequest,
     TokenPair,
@@ -66,6 +68,18 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenPair
 @router.post("/logout", status_code=204)
 def logout(payload: RefreshRequest, db: Session = Depends(get_db)) -> None:
     _service.logout(db, refresh_token=payload.refresh_token)
+
+
+@router.post("/forgot-password", status_code=204)
+def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)) -> None:
+    """Always 204, whether or not an account with this email exists -
+    see AuthService.forgot_password for why (account-enumeration)."""
+    _service.forgot_password(db, email=payload.email)
+
+
+@router.post("/reset-password", status_code=204)
+def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)) -> None:
+    _service.reset_password(db, token=payload.token, new_password=payload.new_password)
 
 
 @router.get("/me", response_model=UserOut)

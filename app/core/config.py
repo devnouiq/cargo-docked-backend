@@ -74,6 +74,18 @@ class Settings(BaseSettings):
     stripe_starter_price_id: str | None = None
     stripe_growth_price_id: str | None = None
 
+    # --- transactional email (Resend) --------------------------------------
+    # Optional, same pattern as Stripe above: unset means the welcome email
+    # and forgot-password email silently no-op (logged as a warning) rather
+    # than failing signup or turning forgot-password into an
+    # account-enumeration oracle - see services/email_service.py.
+    resend_api_key: str | None = None
+    resend_from_email: str = "support@cargodocked.com"
+    # How long a password-reset link stays valid for. Used both to set
+    # PasswordResetToken.expires_at and in the emailed copy ("expires in
+    # N minutes") - see services/auth_service.py.
+    password_reset_token_ttl_minutes: int = 30
+
     # --- webhooks ------------------------------------------------------------
     webhook_signing_secret: str = "dev-only-webhook-secret-change-me"
     webhook_max_attempts: int = 6

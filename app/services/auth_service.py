@@ -9,10 +9,11 @@ environment.
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -28,12 +29,15 @@ from ..core.security import (
     InvalidTokenError,
 )
 from ..core.config import settings
-from ..models.auth import RefreshToken
+from ..models.auth import PasswordResetToken, RefreshToken
 from ..models.organization import Organization, OrganizationMember, OrganizationRole
 from ..models.user import OAuthProvider, User
 from ..repositories.organizations import OrganizationRepository
 from ..repositories.usage import UsageRepository
 from ..repositories.users import UserRepository
+from . import email_service
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SIGNUP_CREDITS = 1000
 
@@ -61,6 +65,14 @@ class AuthService:
         db.commit()
         db.refresh(user)
         db.refresh(org)
+
+        # Best-effort: a Resend outage or missing RESEND_API_KEY must never
+        # fail signup - the account is already committed by this point.
+        try:
+            email_service.send_welcome_email(to_email=user.email, full_name=user.full_name)
+        except Exception:
+            logger.warning("failed to send welcome email to user_id=%s", user.id, exc_info=True)
+
         return user, org
 
     def _create_organization_for(self, db: Session, *, name: str, owner: User) -> Organization:
@@ -203,3 +215,55 @@ class AuthService:
         if row is not None and row.revoked_at is None:
             row.revoked_at = datetime.now(timezone.utc)
             db.commit()
+
+    # --- forgot / reset password -------------------------------------------------
+    def forgot_password(self, db: Session, *, email: str) -> None:
+        """Always "succeeds" from the caller's perspective - the router's
+        /forgot-password always returns 204 regardless of what happens in
+        here. Only issues a real reset token when the account exists;
+        whether the account exists, whether Resend is configured, and
+        whether the send itself succeeds must never be observable from the
+        response, or this becomes an account-enumeration oracle.
+        """
+        user = self.users.get_by_email(db, email)
+        if user is None:
+            return
+
+        raw_token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.password_reset_token_ttl_minutes)
+        db.add(PasswordResetToken(user_id=user.id, token_hash=hash_token(raw_token), expires_at=expires_at))
+        db.commit()
+
+        reset_url = f"{settings.frontend_base_url}/reset-password?token={raw_token}"
+        try:
+            email_service.send_password_reset_email(
+                to_email=user.email, reset_url=reset_url, ttl_minutes=settings.password_reset_token_ttl_minutes
+            )
+        except Exception:
+            # Same reasoning as signup's welcome email: a Resend outage or
+            # missing RESEND_API_KEY must not surface here, and must not
+            # change the response the router sends back.
+            logger.warning("failed to send password reset email to user_id=%s", user.id, exc_info=True)
+
+    def reset_password(self, db: Session, *, token: str, new_password: str) -> None:
+        row = db.query(PasswordResetToken).filter_by(token_hash=hash_token(token)).one_or_none()
+        if row is None or not row.is_active:
+            raise UnauthorizedError("Reset token is invalid, expired, or has already been used.")
+
+        user = self.users.get(db, row.user_id)
+        if user is None:
+            raise UnauthorizedError("Reset token is invalid, expired, or has already been used.")
+
+        # Single-use: mark the token spent before anything else can go
+        # wrong, same "rotate on use" spirit as refresh-token rotation above.
+        row.used_at = datetime.now(timezone.utc)
+        user.hashed_password = hash_password(new_password)
+
+        # A password reset means "assume every existing session may be
+        # compromised" - kick them all out rather than leaving a session
+        # from before the reset (e.g. on a device that triggered the leak)
+        # silently valid.
+        db.query(RefreshToken).filter_by(user_id=user.id, revoked_at=None).update(
+            {RefreshToken.revoked_at: datetime.now(timezone.utc)}
+        )
+        db.commit()

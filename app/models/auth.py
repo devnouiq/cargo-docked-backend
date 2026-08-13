@@ -39,3 +39,27 @@ class RefreshToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         return self.revoked_at is None and expires_at > datetime.now(timezone.utc)
+
+
+class PasswordResetToken(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Single-use forgot-password token. `used_at` (rather than
+    `revoked_at`, like RefreshToken) because the only way this ever stops
+    being active before its TTL is the holder actually redeeming it -
+    there's no separate "revoke" action for a reset token."""
+
+    __tablename__ = "password_reset_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    # sha256 of the raw token - never the raw value (see
+    # core/security.hash_token). The raw value only ever goes into the
+    # emailed reset link.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def is_active(self) -> bool:
+        expires_at = self.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return self.used_at is None and expires_at > datetime.now(timezone.utc)

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlparse
+
+import app.services.auth_service as auth_service_module
+
 
 def test_signup_returns_token_pair(client):
     resp = client.post(
@@ -121,3 +125,87 @@ def test_list_my_organizations(client, signed_up_org):
     orgs = resp.json()
     assert len(orgs) == 1
     assert orgs[0]["slug"] == "acme-shipping"
+
+
+def _fake_send_password_reset_email(monkeypatch):
+    """Stands in for the real Resend HTTP call (services/email_service.py)
+    so these tests never hit the network - records every call so a test
+    can pull the raw reset token out of the emailed reset_url without a
+    dedicated "peek at the DB" backdoor."""
+    sent = []
+    monkeypatch.setattr(
+        auth_service_module.email_service, "send_password_reset_email", lambda **kwargs: sent.append(kwargs)
+    )
+    return sent
+
+
+def _token_from_reset_url(reset_url: str) -> str:
+    return parse_qs(urlparse(reset_url).query)["token"][0]
+
+
+def test_forgot_password_returns_204_regardless_of_email_existence(client, signed_up_org, monkeypatch):
+    sent = _fake_send_password_reset_email(monkeypatch)
+
+    existing = client.post("/v1/auth/forgot-password", json={"email": "founder@example.com"})
+    missing = client.post("/v1/auth/forgot-password", json={"email": "nobody@example.com"})
+
+    assert existing.status_code == 204
+    assert missing.status_code == 204
+    assert existing.content == missing.content == b""
+
+    # Only the real account actually triggers a reset-token/email - but
+    # that's invisible from the two responses above, which is the point.
+    assert len(sent) == 1
+    assert sent[0]["to_email"] == "founder@example.com"
+
+
+def test_forgot_password_degrades_gracefully_without_resend_configured(client, signed_up_org):
+    """RESEND_API_KEY is force-blanked for the whole suite (conftest.py) -
+    forgot-password must still return 204, not surface the
+    FeatureNotConfiguredError that email_service raises internally."""
+    resp = client.post("/v1/auth/forgot-password", json={"email": "founder@example.com"})
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+
+def test_reset_password_with_valid_token_updates_password_and_allows_login(client, signed_up_org, monkeypatch):
+    sent = _fake_send_password_reset_email(monkeypatch)
+
+    resp = client.post("/v1/auth/forgot-password", json={"email": "founder@example.com"})
+    assert resp.status_code == 204
+    assert len(sent) == 1
+    token = _token_from_reset_url(sent[0]["reset_url"])
+
+    reset = client.post("/v1/auth/reset-password", json={"token": token, "new_password": "new-correct-horse-battery"})
+    assert reset.status_code == 204
+
+    old_login = client.post(
+        "/v1/auth/login", json={"email": "founder@example.com", "password": "correct-horse-battery-staple"}
+    )
+    assert old_login.status_code == 401
+
+    new_login = client.post(
+        "/v1/auth/login", json={"email": "founder@example.com", "password": "new-correct-horse-battery"}
+    )
+    assert new_login.status_code == 200
+
+
+def test_reset_password_with_expired_or_reused_token_is_rejected(client):
+    resp = client.post("/v1/auth/reset-password", json={"token": "not-a-real-token", "new_password": "whatever12345"})
+    assert resp.status_code == 401
+    assert resp.json()["code"] == "unauthorized"
+
+
+def test_reset_password_token_is_single_use(client, signed_up_org, monkeypatch):
+    sent = _fake_send_password_reset_email(monkeypatch)
+    client.post("/v1/auth/forgot-password", json={"email": "founder@example.com"})
+    token = _token_from_reset_url(sent[0]["reset_url"])
+
+    first = client.post("/v1/auth/reset-password", json={"token": token, "new_password": "first-new-password-1"})
+    assert first.status_code == 204
+
+    # The token was consumed by the first reset - reusing it must fail,
+    # same reuse-after-use pattern as test_refresh_rotates_token_and_invalidates_old_one.
+    reuse = client.post("/v1/auth/reset-password", json={"token": token, "new_password": "second-new-password-2"})
+    assert reuse.status_code == 401
+    assert reuse.json()["code"] == "unauthorized"

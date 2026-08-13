@@ -51,6 +51,12 @@ os.environ.setdefault("CORS_ALLOW_ORIGINS", '["http://testserver"]')
 # "Stripe not configured" 503 path. Force it blank here regardless of
 # what .env has, same reasoning as the vars above.
 os.environ["STRIPE_SECRET_KEY"] = ""
+# Same reasoning as STRIPE_SECRET_KEY above: a real key sitting in .env for
+# local live-testing must not leak into the test process. With email's
+# swallow-on-failure design (see services/email_service.py /
+# AuthService.signup/forgot_password), signup/forgot-password tests pass
+# unchanged with this blank - the send silently no-ops.
+os.environ["RESEND_API_KEY"] = ""
 
 import pytest
 from fastapi.testclient import TestClient
