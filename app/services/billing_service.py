@@ -13,6 +13,7 @@ app/models/billing.py.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -20,8 +21,10 @@ import stripe
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
-from ..core.errors import FeatureNotConfiguredError, NotFoundError
+from ..core.errors import FeatureNotConfiguredError, NotFoundError, UpstreamProviderError
 from ..models.billing import Plan, Subscription, SubscriptionStatus
+
+logger = logging.getLogger(__name__)
 
 # The plans this product ships with. Seeded via `seed_default_plans()`
 # (called from scripts/init_db.py) - `stripe_price_id` is left None until
@@ -83,23 +86,31 @@ class BillingService:
             raise FeatureNotConfiguredError(f"Plan {plan_code!r} has no Stripe price configured yet.")
 
         subscription = self.get_subscription(db, organization_id)
-        session = stripe.checkout.Session.create(
-            mode="subscription",
-            line_items=[{"price": plan.stripe_price_id, "quantity": 1}],
-            success_url=success_url,
-            cancel_url=cancel_url,
-            customer=subscription.stripe_customer_id if subscription else None,
-            client_reference_id=str(organization_id),
-            metadata={"organization_id": str(organization_id), "plan_code": plan_code},
-            # Stripe does NOT copy the Checkout Session's client_reference_id/
-            # metadata onto the Subscription object it creates - the webhook
-            # handler reads organization_id off the *subscription*
-            # (upsert_subscription_from_stripe_object, keyed by
-            # subscription.items.data[0].price.id), so that mapping has to be
-            # set here too or every subscription.* webhook after the first
-            # checkout is unattributable.
-            subscription_data={"metadata": {"organization_id": str(organization_id), "plan_code": plan_code}},
-        )
+        try:
+            session = stripe.checkout.Session.create(
+                mode="subscription",
+                line_items=[{"price": plan.stripe_price_id, "quantity": 1}],
+                success_url=success_url,
+                cancel_url=cancel_url,
+                customer=subscription.stripe_customer_id if subscription else None,
+                client_reference_id=str(organization_id),
+                metadata={"organization_id": str(organization_id), "plan_code": plan_code},
+                # Stripe does NOT copy the Checkout Session's client_reference_id/
+                # metadata onto the Subscription object it creates - the webhook
+                # handler reads organization_id off the *subscription*
+                # (upsert_subscription_from_stripe_object, keyed by
+                # subscription.items.data[0].price.id), so that mapping has to be
+                # set here too or every subscription.* webhook after the first
+                # checkout is unattributable.
+                subscription_data={"metadata": {"organization_id": str(organization_id), "plan_code": plan_code}},
+            )
+        except stripe.StripeError as exc:
+            # e.g. a plan's stripe_price_id pointing at a Price that doesn't
+            # exist (wrong mode, wrong account, deleted/archived) - Stripe's
+            # own message already says exactly what's wrong, so surface it
+            # rather than a generic one, but as a typed 502, not a raw 500.
+            logger.warning("stripe checkout session creation failed for plan %r: %s", plan_code, exc)
+            raise UpstreamProviderError(f"Could not start checkout: {exc.user_message or str(exc)}") from exc
         return session.url
 
     def _require_customer_id(self, db: Session, organization_id: uuid.UUID) -> str:
