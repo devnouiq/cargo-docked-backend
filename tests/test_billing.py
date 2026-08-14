@@ -6,7 +6,25 @@ that don't need Stripe still work.
 
 from __future__ import annotations
 
-from app.services.billing_service import seed_default_plans
+from app.core.security import hash_token
+from app.models.api_key import ApiKey
+from app.models.billing import Plan
+from app.models.usage import UsageEventType
+from app.services.billing_service import BillingService, seed_default_plans
+from app.services.usage_service import UsageService
+
+
+def _org_id_for(db_session, api_key: str):
+    return db_session.query(ApiKey).filter_by(key_hash=hash_token(api_key)).one().organization_id
+
+
+def _stripe_subscription(*, price_id: str, subscription_id: str = "sub_123") -> dict:
+    return {
+        "id": subscription_id,
+        "customer": "cus_123",
+        "status": "active",
+        "items": {"data": [{"price": {"id": price_id}}]},
+    }
 
 
 def test_list_plans_returns_seeded_defaults(client, db_session):
@@ -57,3 +75,60 @@ def test_payment_method_without_stripe_configured_returns_503(client, signed_up_
 def test_billing_routes_require_a_session(client):
     resp = client.get("/v1/billing/subscription")
     assert resp.status_code == 401
+
+
+def test_plan_change_refills_credits_to_the_new_plans_allotment(client, db_session, api_key):
+    org_id = _org_id_for(db_session, api_key)
+    usage = UsageService()
+
+    # Spend some of the Free plan's starting 1,000 credits first, so a
+    # refill is actually observable rather than trivially still the default.
+    usage.charge(
+        db_session, organization_id=org_id, api_key_id=None,
+        event_type=UsageEventType.CONTAINER_LOOKUP, credits=133,
+    )
+    assert usage.get_balance(db_session, org_id).credits_remaining == 867
+
+    starter_price_id = "price_starter_test"
+    db_session.query(Plan).filter_by(code="starter").update({"stripe_price_id": starter_price_id})
+    db_session.commit()
+
+    BillingService().upsert_subscription_from_stripe_object(
+        db_session, organization_id=org_id, stripe_subscription=_stripe_subscription(price_id=starter_price_id),
+    )
+
+    balance = usage.get_balance(db_session, org_id)
+    assert balance.credits_remaining == 10_000
+    assert balance.credits_included_per_period == 10_000
+
+
+def test_repeated_same_plan_webhook_does_not_re_refill_credits(client, db_session, api_key):
+    """Stripe delivers webhooks at-least-once - a retried/duplicate
+    `subscription.updated` for a plan the org is already on (or one fired
+    for an unrelated change, e.g. a payment method update) must not wipe
+    out credits already spent this period."""
+    org_id = _org_id_for(db_session, api_key)
+    usage = UsageService()
+
+    starter_price_id = "price_starter_test"
+    db_session.query(Plan).filter_by(code="starter").update({"stripe_price_id": starter_price_id})
+    db_session.commit()
+
+    BillingService().upsert_subscription_from_stripe_object(
+        db_session, organization_id=org_id, stripe_subscription=_stripe_subscription(price_id=starter_price_id),
+    )
+    usage.charge(
+        db_session, organization_id=org_id, api_key_id=None,
+        event_type=UsageEventType.CONTAINER_LOOKUP, credits=500,
+    )
+    assert usage.get_balance(db_session, org_id).credits_remaining == 9_500
+
+    # Same plan, new webhook delivery (e.g. Stripe retry, or an unrelated
+    # subscription.updated) - must not reset the balance back to 10,000.
+    BillingService().upsert_subscription_from_stripe_object(
+        db_session,
+        organization_id=org_id,
+        stripe_subscription=_stripe_subscription(price_id=starter_price_id, subscription_id="sub_123"),
+    )
+
+    assert usage.get_balance(db_session, org_id).credits_remaining == 9_500

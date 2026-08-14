@@ -37,6 +37,19 @@ class UsageRepository:
             db.flush()
         return balance
 
+    def set_plan_allotment(self, db: Session, organization_id: uuid.UUID, *, included_credits: int) -> CreditBalance:
+        """Refill credits to a new plan's allotment - called only when an
+        org's subscription plan actually changes (new subscription, upgrade,
+        downgrade), not on every subscription.updated webhook delivery
+        (Stripe also fires that for unrelated changes, e.g. a payment
+        method update - see billing_service.upsert_subscription_from_stripe_object)."""
+        balance = self.get_or_create_balance(db, organization_id, default_credits=included_credits)
+        balance.credits_remaining = included_credits
+        balance.credits_included_per_period = included_credits
+        db.commit()
+        db.refresh(balance)
+        return balance
+
     def try_deduct_credits(self, db: Session, organization_id: uuid.UUID, amount: int) -> bool:
         """Atomically deduct `amount` credits iff the org has enough.
         Returns whether the deduction succeeded."""

@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from ..core.config import settings
 from ..core.errors import FeatureNotConfiguredError, NotFoundError, UpstreamProviderError
 from ..models.billing import Plan, Subscription, SubscriptionStatus
+from .usage_service import UsageService
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,12 @@ class BillingService:
             raise NotFoundError(f"No local plan maps to Stripe price {price_id!r}.")
 
         subscription = self.get_subscription(db, organization_id)
+        # Compare before mutating: a brand-new subscription or a real
+        # plan change both refill credits; a same-plan `subscription.updated`
+        # (payment method change, cancel_at_period_end toggle, Stripe's
+        # at-least-once retry of an event we already processed, ...) must
+        # not re-refill and wipe out credits the org already spent this period.
+        plan_changed = subscription is None or subscription.plan_id != plan.id
         if subscription is None:
             subscription = Subscription(organization_id=organization_id, plan_id=plan.id)
             db.add(subscription)
@@ -190,4 +197,11 @@ class BillingService:
         subscription.status = SubscriptionStatus(stripe_subscription["status"])
         db.commit()
         db.refresh(subscription)
+
+        if plan_changed:
+            # A customer who just paid for a plan expects its full credit
+            # allotment usable immediately, not whatever was left over from
+            # their previous plan.
+            UsageService().set_plan_allotment(db, organization_id, included_credits=plan.included_credits)
+
         return subscription

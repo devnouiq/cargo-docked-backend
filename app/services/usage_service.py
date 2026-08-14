@@ -50,5 +50,8 @@ class UsageService:
     def get_balance(self, db: Session, organization_id: uuid.UUID) -> CreditBalance:
         return self.repo.get_or_create_balance(db, organization_id)
 
+    def set_plan_allotment(self, db: Session, organization_id: uuid.UUID, *, included_credits: int) -> CreditBalance:
+        return self.repo.set_plan_allotment(db, organization_id, included_credits=included_credits)
+
     def list_events(self, db: Session, organization_id: uuid.UUID, *, limit: int = 50, offset: int = 0):
         return self.repo.list_events(db, organization_id, limit=limit, offset=offset)
