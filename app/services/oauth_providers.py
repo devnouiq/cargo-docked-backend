@@ -53,32 +53,46 @@ def get_config(provider: OAuthProvider) -> OAuthProviderConfig:
     return config
 
 
-def build_authorization_url(provider: OAuthProvider, *, redirect_uri: str, state: str) -> str:
+def build_authorization_url(
+    provider: OAuthProvider, *, redirect_uri: str, state: str, code_challenge: str | None = None
+) -> str:
     config = get_config(provider)
-    params = httpx.QueryParams(
-        {
-            "client_id": config.client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": config.scope,
-            "state": state,
-        }
-    )
+    params_dict = {
+        "client_id": config.client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": config.scope,
+        "state": state,
+    }
+    # PKCE (RFC 7636): the frontend generates code_verifier/code_challenge
+    # and only ever sends us the challenge here; the verifier itself is
+    # presented later in exchange_code_for_access_token so Google can bind
+    # the two together. Optional - degrades to plain authorization-code
+    # flow if the caller doesn't pass one.
+    if code_challenge:
+        params_dict["code_challenge"] = code_challenge
+        params_dict["code_challenge_method"] = "S256"
+    params = httpx.QueryParams(params_dict)
     return f"{config.authorize_url}?{params}"
 
 
-async def exchange_code_for_access_token(provider: OAuthProvider, *, code: str, redirect_uri: str) -> str:
+async def exchange_code_for_access_token(
+    provider: OAuthProvider, *, code: str, redirect_uri: str, code_verifier: str | None = None
+) -> str:
     config = get_config(provider)
+    data = {
+        "client_id": config.client_id,
+        "client_secret": config.client_secret,
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    if code_verifier:
+        data["code_verifier"] = code_verifier
     async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(
             config.token_url,
-            data={
-                "client_id": config.client_id,
-                "client_secret": config.client_secret,
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
+            data=data,
             headers={"Accept": "application/json"},
         )
     response.raise_for_status()

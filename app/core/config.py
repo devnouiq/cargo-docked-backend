@@ -52,10 +52,13 @@ class Settings(BaseSettings):
     # --- OAuth ---------------------------------------------------------------
     google_client_id: str | None = None
     google_client_secret: str | None = None
-    # Where OAuth providers redirect back to after consent, e.g.
-    # https://api.example.com/v1/auth/oauth/{provider}/callback
-    oauth_redirect_base_url: str = "http://localhost:8000"
     # Where to send the browser after login completes, e.g. the dashboard app.
+    # Also doubles as the OAuth redirect_uri host: providers redirect the
+    # browser straight to {frontend_base_url}/auth/{provider}/callback (see
+    # routers/v1/auth.py::_oauth_redirect_uri) - this backend is never in
+    # that browser round-trip, so Google's consent screen only ever shows
+    # this domain, never the Cloud Run URL. Must exactly match the redirect
+    # URI registered with the OAuth app in Google Cloud Console.
     frontend_base_url: str = "http://localhost:3000"
 
     # --- API keys -------------------------------------------------------------

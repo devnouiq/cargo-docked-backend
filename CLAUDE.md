@@ -206,9 +206,12 @@ configured. Notes specific to *this* backend if you're setting it up
 fresh:
 
 - **OAuth**: register a Google Cloud OAuth client with redirect URI
-  `{OAUTH_REDIRECT_BASE_URL}/v1/auth/oauth/google/callback` (must match
-  exactly). Google apps in "Testing" publish status only let
-  explicitly-added test-user accounts log in.
+  `{FRONTEND_BASE_URL}/auth/google/callback` (must match exactly - this is
+  a frontend route, not a backend one; the browser is redirected there
+  directly by Google, and that page calls this backend's
+  `POST /v1/auth/oauth/google/exchange` itself, so this API never appears
+  in the browser-visible OAuth round-trip). Google apps in "Testing"
+  publish status only let explicitly-added test-user accounts log in.
 - **Stripe**: get test-mode `sk_test_.../pk_test_...` from the dashboard
   (toggle "Test mode" on first - live-mode keys exist by default on any
   account regardless of activation status, they're just inert). For each

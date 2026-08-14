@@ -53,3 +53,14 @@ class UserOut(BaseModel):
 
 class OAuthAuthorizeResponse(BaseModel):
     authorization_url: str
+
+
+class OAuthExchangeRequest(BaseModel):
+    code: str
+    # Round-tripped from the frontend for audit/log correlation only - the
+    # actual CSRF check (comparing this against the value stashed before
+    # redirecting to the provider) happens client-side before this request
+    # is ever sent, since this API is stateless and never stored the state
+    # it handed out. See auth.py's oauth_exchange docstring for why.
+    state: str
+    code_verifier: str | None = None
