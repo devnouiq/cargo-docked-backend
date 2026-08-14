@@ -101,4 +101,8 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
         else:
             logger.warning("stripe subscription event %s had no organization_id in metadata", stripe_subscription.get("id"))
 
+    elif event["type"] == "invoice.paid":
+        invoice = event["data"]["object"].to_dict()
+        _service.refill_credits_for_invoice(db, invoice=invoice)
+
     return {"received": True}

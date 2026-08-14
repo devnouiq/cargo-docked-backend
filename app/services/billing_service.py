@@ -76,6 +76,9 @@ class BillingService:
     def get_subscription(self, db: Session, organization_id: uuid.UUID) -> Subscription | None:
         return db.query(Subscription).filter_by(organization_id=organization_id).one_or_none()
 
+    def get_subscription_by_stripe_id(self, db: Session, stripe_subscription_id: str) -> Subscription | None:
+        return db.query(Subscription).filter_by(stripe_subscription_id=stripe_subscription_id).one_or_none()
+
     def create_checkout_session(
         self, db: Session, *, organization_id: uuid.UUID, plan_code: str, success_url: str, cancel_url: str
     ) -> str:
@@ -205,3 +208,41 @@ class BillingService:
             UsageService().set_plan_allotment(db, organization_id, included_credits=plan.included_credits)
 
         return subscription
+
+    def refill_credits_for_invoice(self, db: Session, *, invoice: dict) -> None:
+        """Reset an org's credit balance to its plan's allotment at the
+        start of a new billing period - called on the `invoice.paid`
+        webhook, which Stripe fires identically for a monthly renewal and
+        an annual renewal (and for the first invoice on a brand-new
+        subscription, and for upgrade/downgrade proration invoices - both
+        already handled by `upsert_subscription_from_stripe_object`, so
+        this being unconditional just sets the same value again there).
+
+        Not gated on `invoice.billing_reason` - the point is "a period
+        started, balance = plan.included_credits" regardless of why Stripe
+        generated this particular invoice.
+        """
+        # This API version nests the generating subscription under
+        # invoice.parent.subscription_details.subscription rather than a
+        # top-level invoice.subscription field (see stripe._invoice.py's
+        # Invoice.Parent.SubscriptionDetails) - a one-off invoice has no
+        # `parent.subscription_details` at all.
+        subscription_id = ((invoice.get("parent") or {}).get("subscription_details") or {}).get("subscription")
+        if not subscription_id:
+            return
+
+        subscription = self.get_subscription_by_stripe_id(db, subscription_id)
+        if subscription is None:
+            # Stripe doesn't guarantee webhook delivery order - invoice.paid
+            # for a brand-new subscription can arrive before the
+            # subscription.created event that creates our local row.
+            # subscription.created's own refill covers that case instead.
+            logger.warning(
+                "invoice.paid for stripe subscription %r with no matching local Subscription row yet",
+                subscription_id,
+            )
+            return
+
+        UsageService().set_plan_allotment(
+            db, subscription.organization_id, included_credits=subscription.plan.included_credits
+        )
