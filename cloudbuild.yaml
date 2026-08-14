@@ -9,8 +9,9 @@
 # instance; a multi-replica rollout should move migrations to their own
 # release step instead of letting every replica race to migrate on boot.
 #
-# FRONTEND_BASE_URL / CORS_ALLOW_ORIGINS point at the real production
-# Vercel domain (https://cargo-docked.vercel.app).
+# FRONTEND_BASE_URL points at the real production Vercel domain
+# (https://cargo-docked.vercel.app). CORS_ALLOW_ORIGINS additionally
+# allows https://cargodocked.com (the custom domain).
 
 steps:
   - name: 'gcr.io/cloud-builders/docker'
@@ -42,7 +43,8 @@ steps:
       - '--add-cloudsql-instances=$PROJECT_ID:us-central1:cargotrack-db'
       - '--network=default'
       - '--vpc-egress=private-ranges-only'
-      - '--set-env-vars=ENV=production,LOG_LEVEL=INFO,OAUTH_REDIRECT_BASE_URL=https://cargotrack-api-34343163556.us-central1.run.app,FRONTEND_BASE_URL=https://cargo-docked.vercel.app,CORS_ALLOW_ORIGINS=["https://cargo-docked.vercel.app"],GOOGLE_CLIENT_ID=34343163556-mf0ud0lhvgsi0limqu5el8hlhg37lm71.apps.googleusercontent.com,OXYLABS_PROXY_HOST=pr.oxylabs.io:7777,OXYLABS_PROXY_USERNAME=customer-DataDocked2026_KmjsA,CONTAINER_CACHE_TTL_SECONDS=600,RESEND_FROM_EMAIL=support@cargodocked.com'
+      - >-
+        --set-env-vars=^##^ENV=production##LOG_LEVEL=INFO##OAUTH_REDIRECT_BASE_URL=https://cargotrack-api-34343163556.us-central1.run.app##FRONTEND_BASE_URL=https://cargo-docked.vercel.app##CORS_ALLOW_ORIGINS=["https://cargo-docked.vercel.app","https://cargodocked.com"]##GOOGLE_CLIENT_ID=34343163556-mf0ud0lhvgsi0limqu5el8hlhg37lm71.apps.googleusercontent.com##OXYLABS_PROXY_HOST=pr.oxylabs.io:7777##OXYLABS_PROXY_USERNAME=customer-DataDocked2026_KmjsA##CONTAINER_CACHE_TTL_SECONDS=600##RESEND_FROM_EMAIL=support@cargodocked.com
       - >-
         --set-secrets=DATABASE_URL=database-url:latest,REDIS_URL=redis-url:latest,
         JWT_SECRET=jwt-secret:latest,GOOGLE_CLIENT_SECRET=google-client-secret:latest,
