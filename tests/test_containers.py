@@ -69,7 +69,7 @@ def test_bulk_tracking_queues_every_number_without_scraping_inline(client, api_k
     Every accepted number - including one no provider will ever resolve -
     comes back `ok: true` / `queued` with no carrier data yet; resolvability
     is the worker's problem, and "not in the carrier's system yet" was never
-    an error to begin with (the poller retries it).
+    an error to begin with (a manual re-scrape or webhook retry resolves it).
     """
     resp = client.post(
         "/v1/containers/bulk",
@@ -145,7 +145,7 @@ def test_bulk_charges_exactly_one_credit_per_unique_container(client, api_key):
 
 def test_bulk_survives_the_arq_pool_being_unreachable(client, api_key, monkeypatch):
     """Redis outage: rows are already committed, so the client still gets a
-    202 and the rows sit `queued` for the poller to sweep."""
+    202 and the rows sit `queued` until manually re-scraped."""
     import app.services.container_service as container_service_module
 
     async def _exploding_pool():

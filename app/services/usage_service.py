@@ -1,8 +1,8 @@
 """Usage metering: the single choke point every credit-consuming action
 goes through. `charge` is the only way credits leave an org's balance -
-container_service.py calls it per lookup, the arq poller calls it per
-refresh - so `GET /v1/usage`'s ledger (usage_events) is always a complete,
-accurate record of what was charged and why.
+container_service.py calls it per lookup/refresh - so `GET /v1/usage`'s
+ledger (usage_events) is always a complete, accurate record of what was
+charged and why.
 """
 
 from __future__ import annotations

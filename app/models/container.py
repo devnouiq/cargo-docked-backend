@@ -32,8 +32,8 @@ class ContainerScrapeStatus(enum.StrEnum):
 
     `NO_DATA` vs `FAILED` is a product distinction, not a technical one: a
     provider that ran cleanly and simply found nothing yet is a normal,
-    non-error outcome (the poller retries later), whereas `FAILED` is
-    reserved for the scrape job itself crashing.
+    non-error outcome (a later manual re-scrape may resolve it), whereas
+    `FAILED` is reserved for the scrape job itself crashing.
     """
 
     QUEUED = "queued"

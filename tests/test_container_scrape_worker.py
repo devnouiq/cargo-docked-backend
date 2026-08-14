@@ -5,7 +5,7 @@ Two things here are load-bearing product behavior rather than mechanics,
 and both have a dedicated test below:
   * a provider that resolves nothing is `no_data`, never `failed`;
   * the job charges no credit - the API already charged when it queued the
-    row (whereas the *poller's* path still charges CONTAINER_REFRESH).
+    row.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from app.core.security import hash_token
 from app.models.api_key import ApiKey
 from app.models.container import ContainerScrapeStatus, TrackedContainer
 from app.repositories.containers import ContainerRepository
-from app.services.container_service import ContainerService
 from app.workers.tasks.scrape import scrape_container
 
 _containers = ContainerRepository()
@@ -128,17 +127,3 @@ async def test_scrape_of_a_deactivated_container_is_a_clean_noop(db_session, api
     refreshed = _reload(db_session, container.id)
     assert refreshed.scrape_status == ContainerScrapeStatus.QUEUED  # untouched
     assert refreshed.status is None
-
-
-@pytest.mark.asyncio
-async def test_poller_path_still_charges_a_refresh_credit(db_session, api_key, client):
-    """Splitting refresh_and_notify from process_queued_scrape must not have
-    silently disarmed the poller's own billing."""
-    org_id = _org_id_for(db_session, api_key)
-    container = _queued_container(db_session, organization_id=org_id, number="MSKU1234567")
-
-    before = _credits(client, api_key)
-    await ContainerService().refresh_and_notify(container.id)
-
-    assert _credits(client, api_key) == before - 1
-    assert _reload(db_session, container.id).scrape_status == ContainerScrapeStatus.SUCCEEDED

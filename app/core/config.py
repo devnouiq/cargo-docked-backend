@@ -102,9 +102,7 @@ class Settings(BaseSettings):
     scraper_retries: int = 1
     container_cache_ttl_seconds: int = 6 * 3600
 
-    # --- carrier poller --------------------------------------------------------
-    poller_refresh_interval_minutes: int = 30
-    poller_batch_size: int = 10
+    # --- background scrape jobs -------------------------------------------------
     # Hard bound on one queued scrape job. The provider chain includes two
     # browser-based fallbacks and has no timeout of its own.
     scrape_job_timeout_s: int = 240

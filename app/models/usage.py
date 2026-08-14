@@ -27,7 +27,10 @@ from .mixins import TimestampMixin, UUIDPrimaryKeyMixin
 class UsageEventType(enum.StrEnum):
     CONTAINER_LOOKUP = "container_lookup"
     BULK_LOOKUP = "bulk_lookup"
-    CONTAINER_REFRESH = "container_refresh"  # charged by the background poller, not a direct API call
+    # Historical only - the background poller that charged these was removed
+    # (auto re-scraping on a timer silently spent user credits). Kept so
+    # past usage-event rows of this type still deserialize.
+    CONTAINER_REFRESH = "container_refresh"
 
 
 class CreditBalance(UUIDPrimaryKeyMixin, TimestampMixin, Base):

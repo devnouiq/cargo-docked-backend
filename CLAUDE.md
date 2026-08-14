@@ -12,7 +12,10 @@ repo owns:
 - Auth (OAuth + JWT sessions), org/team management, API keys
 - Usage metering / credits, Stripe billing
 - The carrier/terminal data engine: a provider-registry adapter over
-  several scrapers, with a background poller keeping tracked containers fresh
+  several scrapers. Re-scraping a tracked container is customer-initiated
+  (manual refresh, bulk import, or a fresh lookup) - there is no background
+  poller re-scraping containers on a timer (removed: it silently spent
+  customer credits on a fixed schedule).
 
 ## Architecture map
 
@@ -27,7 +30,7 @@ app/
   providers/      carrier/terminal data sources + the registry that unifies them
   routers/v1/     the standardized /v1 API (JWT-auth dashboard routes + API-key-auth product routes)
   routers/        tracking.py (deprecated /v1/track* aliases), searates_debug.py (internal, untouched)
-  workers/        arq worker process: webhook delivery + the carrier-refresh poller
+  workers/        arq worker process: webhook delivery + on-demand container scraping
 alembic/          schema migrations - the only thing that creates/changes tables
 tests/            pytest suite (SQLite, hermetic - no real DB/Redis/network needed)
 ```
@@ -120,7 +123,7 @@ docker compose up -d postgres redis
 uv run alembic upgrade head
 uv run python scripts/init_db.py   # seeds plans + a dev org/user/API key
 uv run uvicorn app.main:app --reload
-# separately, for webhook delivery + the carrier poller:
+# separately, for webhook delivery + background container scraping:
 uv run arq app.workers.arq_app.WorkerSettings
 ```
 

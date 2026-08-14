@@ -23,8 +23,8 @@ uv run uvicorn app.main:app --reload
 
 API docs: http://localhost:8000/docs
 
-In a second terminal, run the background worker (webhook delivery + the
-carrier-refresh poller):
+In a second terminal, run the background worker (webhook delivery +
+on-demand container scraping):
 
 ```bash
 uv run arq app.workers.arq_app.WorkerSettings

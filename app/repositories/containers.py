@@ -64,9 +64,6 @@ class ContainerRepository:
         )
         return items, total
 
-    def list_active_for_polling(self, db: Session, *, limit: int = 500) -> list[TrackedContainer]:
-        return db.query(TrackedContainer).filter_by(is_active=True).limit(limit).all()
-
     def deactivate(self, db: Session, container: TrackedContainer) -> None:
         container.is_active = False
         db.flush()

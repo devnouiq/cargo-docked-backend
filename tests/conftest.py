@@ -117,9 +117,9 @@ def _fake_provider_registry(monkeypatch):
     fake = _FakeProviderRegistry()
     monkeypatch.setattr(containers_router._service, "registry", fake)
     monkeypatch.setattr(tracking_router._service, "registry", fake)
-    # The `scrape_container` arq task builds its own fresh ContainerService()
-    # (like poller.py already does), which would otherwise construct the
-    # *real* provider registry and make live network calls. Patching the
+    # The `scrape_container` arq task builds its own fresh ContainerService(),
+    # which would otherwise construct the *real* provider registry and make
+    # live network calls. Patching the
     # factory covers every such instance, not just the routers' singletons.
     monkeypatch.setattr(container_service_module, "build_default_registry", lambda: fake)
     return fake

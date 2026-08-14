@@ -2,13 +2,11 @@
 resolve the container through the provider registry, persist the result,
 and notify webhooks when something meaningful changed.
 
-`track()` (a direct API call/POST), `refresh_and_notify()` (the arq
-poller's schedule) and `process_queued_scrape()` (the `scrape_container`
-job queued by `queue_bulk()`/`request_refresh()`) all end at the same
-`_refresh_and_apply` step, so "a customer looked it up", "the background
-poller checked it" and "the worker drained the queue" produce identical
-downstream behavior - persisted state, `scrape_status` transitions and
-webhook events alike.
+`track()` (a direct API call/POST) and `process_queued_scrape()` (the
+`scrape_container` job queued by `queue_bulk()`/`request_refresh()`) both
+end at the same `_refresh_and_apply` step, so "a customer looked it up"
+and "the worker drained the queue" produce identical downstream behavior -
+persisted state, `scrape_status` transitions and webhook events alike.
 
 The one thing that differs between them is billing: the API layer charges
 at submission time, so the worker path must charge nothing (see
@@ -233,8 +231,9 @@ class ContainerService:
 
         Same resilience shape as webhook_service.trigger(): the rows are
         already committed, so a Redis outage here is not an error the caller
-        should ever see - the row stays `queued` and the 30-minute poller
-        sweeps it later.
+        should ever see. Note there is no background sweep anymore (the
+        30-minute poller was removed) - a row that fails to enqueue here
+        stays `queued` until the customer manually re-scrapes it.
         """
         if not containers:
             return
@@ -245,16 +244,11 @@ class ContainerService:
                 if pool is None:
                     pool = await get_arq_pool()
                 await pool.enqueue_job("scrape_container", str(container.id))
-            except Exception:  # noqa: BLE001 - row already persisted as queued; the poller sweeps it
+            except Exception:  # noqa: BLE001 - row already persisted as queued; caller can manually retry
                 logger.warning(
                     "failed to enqueue scrape for container %s (%s) - left queued",
                     container.id, container.container_number, exc_info=True,
                 )
-
-    async def refresh_and_notify(self, container_id: uuid.UUID) -> None:
-        """Entry point for the arq poller - charges a refresh credit, since
-        this is work nobody asked for at the API layer."""
-        await self._process_in_own_session(container_id, charge_event_type=UsageEventType.CONTAINER_REFRESH)
 
     async def process_queued_scrape(self, container_id: uuid.UUID) -> None:
         """Entry point for the `scrape_container` arq task.
