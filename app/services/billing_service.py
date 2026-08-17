@@ -282,6 +282,14 @@ class BillingService:
                             "currency": currency,
                             "product_data": {"name": f"{credits} tracking credits"},
                             "unit_amount": unit_amount,
+                            # Real (pre-created) Stripe Prices carry a
+                            # tax_behavior already (see the plans' Prices -
+                            # "exclusive", i.e. tax is added on top of the
+                            # listed amount). Ad-hoc price_data has no such
+                            # default - automatic_tax needs to be told
+                            # explicitly, or it can't determine whether
+                            # unit_amount already includes tax.
+                            "tax_behavior": "exclusive",
                         },
                         "quantity": 1,
                     }
