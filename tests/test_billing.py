@@ -279,7 +279,11 @@ def test_checkout_session_currency_usd_selects_the_usd_stripe_price_id(client, s
     assert resp.status_code == 200, resp.text
     assert resp.json()["checkout_url"] == _fake_stripe_session().url
     assert captured["line_items"] == [{"price": "price_usd_test", "quantity": 1}]
-    assert captured["automatic_tax"] == {"enabled": True}
+    # No vat_number was sent, so automatic_tax (which requires Stripe Tax
+    # configured on the account) is correctly omitted - see
+    # create_checkout_session's docstring/comment for why it's gated on
+    # vat_number rather than always on.
+    assert "automatic_tax" not in captured
     assert captured["tax_id_collection"] == {"enabled": True}
 
 

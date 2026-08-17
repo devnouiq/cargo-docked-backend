@@ -201,35 +201,39 @@ class BillingService:
         # Stripe rejects `customer_update` when no `customer` is set, hence
         # the conditional.
         customer_update = {"address": "auto", "name": "auto"} if customer_id else None
+        # tax_id_collection just shows the VAT/tax-id field in the Stripe-hosted
+        # UI - harmless to always enable, no account-level Tax setup needed.
+        # automatic_tax is the part that actually applies EU B2B reverse-charge
+        # once a valid tax ID is on the customer, but it requires Stripe Tax to
+        # be configured (an origin/head-office address) on the connected
+        # account - a fresh/new Stripe account (e.g. after rotating which
+        # account this app points at) won't have that done yet. Gating it on
+        # vat_number being present means a plain checkout (the vast majority)
+        # never needs Tax configured at all; only a customer who actually
+        # enters a VAT number hits that requirement, and only then.
+        checkout_kwargs = {
+            "mode": "subscription",
+            "line_items": [{"price": price_id, "quantity": 1}],
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "customer": customer_id,
+            "customer_update": customer_update,
+            "client_reference_id": str(organization_id),
+            "metadata": {"organization_id": str(organization_id), "plan_code": plan_code},
+            # Stripe does NOT copy the Checkout Session's client_reference_id/
+            # metadata onto the Subscription object it creates - the webhook
+            # handler reads organization_id off the *subscription*
+            # (upsert_subscription_from_stripe_object, keyed by
+            # subscription.items.data[0].price.id), so that mapping has to be
+            # set here too or every subscription.* webhook after the first
+            # checkout is unattributable.
+            "subscription_data": {"metadata": {"organization_id": str(organization_id), "plan_code": plan_code}},
+            "tax_id_collection": {"enabled": True},
+        }
+        if vat_number:
+            checkout_kwargs["automatic_tax"] = {"enabled": True}
         try:
-            session = stripe.checkout.Session.create(
-                mode="subscription",
-                line_items=[{"price": price_id, "quantity": 1}],
-                success_url=success_url,
-                cancel_url=cancel_url,
-                customer=customer_id,
-                customer_update=customer_update,
-                client_reference_id=str(organization_id),
-                metadata={"organization_id": str(organization_id), "plan_code": plan_code},
-                # Stripe does NOT copy the Checkout Session's client_reference_id/
-                # metadata onto the Subscription object it creates - the webhook
-                # handler reads organization_id off the *subscription*
-                # (upsert_subscription_from_stripe_object, keyed by
-                # subscription.items.data[0].price.id), so that mapping has to be
-                # set here too or every subscription.* webhook after the first
-                # checkout is unattributable.
-                subscription_data={"metadata": {"organization_id": str(organization_id), "plan_code": plan_code}},
-                # Always show the VAT/tax-id field in Checkout, regardless of
-                # whether the caller supplied one up front - a customer can
-                # still add it in the Stripe-hosted UI. automatic_tax is what
-                # actually applies EU B2B reverse-charge once a valid tax ID
-                # is on the customer - requires Stripe Tax to be enabled on
-                # the connected account; if it isn't (common in a fresh test
-                # account), this call fails and surfaces as UpstreamProviderError
-                # below rather than silently skipping tax handling.
-                tax_id_collection={"enabled": True},
-                automatic_tax={"enabled": True},
-            )
+            session = stripe.checkout.Session.create(**checkout_kwargs)
         except stripe.StripeError as exc:
             # e.g. a plan's stripe_price_id pointing at a Price that doesn't
             # exist (wrong mode, wrong account, deleted/archived), or Stripe
@@ -273,36 +277,41 @@ class BillingService:
         # See create_checkout_session - automatic_tax needs an address, and
         # an existing customer_id (the VAT path above) may not have one yet.
         customer_update = {"address": "auto", "name": "auto"} if customer_id else None
+        # See create_checkout_session for why automatic_tax is gated on
+        # vat_number rather than always on - it's the only part of this that
+        # requires Stripe Tax configured on the account.
+        credit_checkout_kwargs = {
+            "mode": "payment",
+            "line_items": [
+                {
+                    "price_data": {
+                        "currency": currency,
+                        "product_data": {"name": f"{credits} tracking credits"},
+                        "unit_amount": unit_amount,
+                        # Real (pre-created) Stripe Prices carry a
+                        # tax_behavior already (see the plans' Prices -
+                        # "exclusive", i.e. tax is added on top of the
+                        # listed amount). Ad-hoc price_data has no such
+                        # default - automatic_tax needs to be told
+                        # explicitly, or it can't determine whether
+                        # unit_amount already includes tax.
+                        "tax_behavior": "exclusive",
+                    },
+                    "quantity": 1,
+                }
+            ],
+            "success_url": success_url,
+            "cancel_url": cancel_url,
+            "customer": customer_id,
+            "customer_update": customer_update,
+            "client_reference_id": str(organization_id),
+            "metadata": {"organization_id": str(organization_id), "credits": str(credits), "type": "credit_purchase"},
+            "tax_id_collection": {"enabled": True},
+        }
+        if vat_number:
+            credit_checkout_kwargs["automatic_tax"] = {"enabled": True}
         try:
-            session = stripe.checkout.Session.create(
-                mode="payment",
-                line_items=[
-                    {
-                        "price_data": {
-                            "currency": currency,
-                            "product_data": {"name": f"{credits} tracking credits"},
-                            "unit_amount": unit_amount,
-                            # Real (pre-created) Stripe Prices carry a
-                            # tax_behavior already (see the plans' Prices -
-                            # "exclusive", i.e. tax is added on top of the
-                            # listed amount). Ad-hoc price_data has no such
-                            # default - automatic_tax needs to be told
-                            # explicitly, or it can't determine whether
-                            # unit_amount already includes tax.
-                            "tax_behavior": "exclusive",
-                        },
-                        "quantity": 1,
-                    }
-                ],
-                success_url=success_url,
-                cancel_url=cancel_url,
-                customer=customer_id,
-                customer_update=customer_update,
-                client_reference_id=str(organization_id),
-                metadata={"organization_id": str(organization_id), "credits": str(credits), "type": "credit_purchase"},
-                tax_id_collection={"enabled": True},
-                automatic_tax={"enabled": True},
-            )
+            session = stripe.checkout.Session.create(**credit_checkout_kwargs)
         except stripe.StripeError as exc:
             logger.warning("stripe credit checkout session creation failed for org %s: %s", organization_id, exc)
             raise UpstreamProviderError(f"Could not start checkout: {exc.user_message or str(exc)}") from exc
