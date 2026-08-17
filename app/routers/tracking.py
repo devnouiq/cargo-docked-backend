@@ -76,5 +76,11 @@ async def track_single(number: str, principal: ApiKeyPrincipal = Depends(get_api
 @router.get("/providers", deprecated=True)
 async def get_providers(principal: ApiKeyPrincipal = Depends(get_api_key_principal)):
     """Deprecated, informational only - the provider registry
-    (providers/registry.py) now decides per-container which source to use."""
-    return {"providers": _service.registry.provider_names}
+    (providers/registry.py) now decides per-container which source to use.
+
+    Deliberately returns an empty list: this used to expose the internal
+    provider-registry identifiers (e.g. "searates_http"), which is the same
+    category of customer-facing internal-detail leak as the old
+    `scrape_status`/`provider_name` fields - kept mounted (not removed, per
+    the deprecate-don't-break convention) but emptied out."""
+    return {"providers": []}

@@ -16,6 +16,7 @@ from ...dependencies import CurrentSession, get_current_session
 from ...schemas.billing import (
     CheckoutSessionRequest,
     CheckoutSessionResponse,
+    CreditCheckoutSessionRequest,
     InvoiceOut,
     PaymentMethodOut,
     PlanOut,
@@ -60,6 +61,19 @@ def create_checkout_session(
     url = _service.create_checkout_session(
         db, organization_id=session.organization.id, plan_code=payload.plan_code,
         success_url=payload.success_url, cancel_url=payload.cancel_url,
+        currency=payload.currency, vat_number=payload.vat_number, customer_email=session.user.email,
+    )
+    return CheckoutSessionResponse(checkout_url=url)
+
+
+@router.post("/credits/checkout-session", response_model=CheckoutSessionResponse)
+def create_credit_checkout_session(
+    payload: CreditCheckoutSessionRequest, session: CurrentSession = Depends(get_current_session), db=Depends(get_db)
+):
+    url = _service.create_credit_checkout_session(
+        db, organization_id=session.organization.id, credits=payload.credits,
+        success_url=payload.success_url, cancel_url=payload.cancel_url,
+        currency=payload.currency, vat_number=payload.vat_number, customer_email=session.user.email,
     )
     return CheckoutSessionResponse(checkout_url=url)
 
@@ -104,5 +118,23 @@ async def stripe_webhook(request: Request, db=Depends(get_db)):
     elif event["type"] == "invoice.paid":
         invoice = event["data"]["object"].to_dict()
         _service.refill_credits_for_invoice(db, invoice=invoice)
+
+    elif event["type"] == "checkout.session.completed":
+        # Only pay-per-credit top-ups care about this event (see
+        # BillingService.create_credit_checkout_session) - subscription
+        # checkouts are handled via customer.subscription.created/updated
+        # above instead, which carry richer plan/status data.
+        checkout_session = event["data"]["object"].to_dict()
+        metadata = checkout_session.get("metadata") or {}
+        if metadata.get("type") == "credit_purchase":
+            organization_id = metadata.get("organization_id")
+            credits = metadata.get("credits")
+            if organization_id and credits:
+                _service.apply_credit_purchase(db, organization_id=uuid.UUID(organization_id), credits=int(credits))
+            else:
+                logger.warning(
+                    "checkout.session.completed credit_purchase event %s missing organization_id/credits in metadata",
+                    checkout_session.get("id"),
+                )
 
     return {"received": True}

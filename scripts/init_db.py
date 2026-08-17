@@ -23,7 +23,7 @@ DEV_ORG_NAME = "Dev Org"
 def main() -> None:
     with SessionLocal() as db:
         seed_default_plans(db)
-        print("Seeded default plans (free/starter/growth/enterprise).")
+        print("Seeded default plans (free/feeder/panamax/ultra/fleet/enterprise).")
 
         auth = AuthService()
         user = auth.users.get_by_email(db, DEV_EMAIL)

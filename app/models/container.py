@@ -38,7 +38,7 @@ class ContainerScrapeStatus(enum.StrEnum):
 
     QUEUED = "queued"
     IN_PROGRESS = "in_progress"
-    SUCCEEDED = "succeeded"
+    COMPLETED = "completed"
     NO_DATA = "no_data"
     FAILED = "failed"
 
@@ -52,7 +52,6 @@ class TrackedContainer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     container_number: Mapped[str] = mapped_column(String(30), index=True, nullable=False)
     reference: Mapped[str | None] = mapped_column(String(100), nullable=True)  # customer's own PO/booking ref
     carrier_scac: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    provider_name: Mapped[str | None] = mapped_column(String(50), nullable=True)  # which provider last resolved this
 
     status: Mapped[str | None] = mapped_column(String(100), nullable=True)
     last_known_location: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -66,10 +65,10 @@ class TrackedContainer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     raw_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    scrape_status: Mapped[ContainerScrapeStatus] = mapped_column(
-        Enum(ContainerScrapeStatus, native_enum=False, length=20), default=ContainerScrapeStatus.QUEUED, nullable=False
+    tracking_status: Mapped[ContainerScrapeStatus] = mapped_column(
+        "tracking_status", Enum(ContainerScrapeStatus, native_enum=False, length=20), default=ContainerScrapeStatus.QUEUED, nullable=False
     )
-    scrape_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    tracking_message: Mapped[str | None] = mapped_column("tracking_message", String(500), nullable=True)
 
     events: Mapped[list["ContainerEvent"]] = relationship(
         back_populates="container", cascade="all, delete-orphan", order_by="ContainerEvent.occurred_at"

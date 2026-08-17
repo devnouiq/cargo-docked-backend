@@ -10,6 +10,120 @@ import pytest
 
 from app.providers.base import NormalizedTrackingResult
 from app.providers.registry import ProviderRegistry, RomeuHttpProvider, SearatesHttpProvider
+from app.providers.searates_http import SeaRatesTracker
+
+# --- SeaRatesTracker._parse: vessel/location reference-ID resolution ------------
+#
+# Regression test for a real bug: SeaRates' raw payload can reference a
+# vessel/location by numeric ID into a separate lookup table instead of
+# embedding the name directly on the event, and the un-fixed `_parse()` used
+# to pass that raw ID straight through - so a customer would see "214" where
+# a vessel name belongs. No real captured payload of this shape exists in
+# the repo (SEARATES_RAW_SUCCESS above already uses pre-resolved names, so
+# it doesn't exercise this path at all) - this fixture is synthetic, built
+# from the fix's own defensive key-name assumptions.
+
+SEARATES_RAW_WITH_ID_REFERENCES = {
+    "status": "success",
+    "message": "",
+    "data": {
+        "metadata": {"number": "MSKU1234567", "status": "In Transit"},
+        "locations": [],
+        "route": {},
+        "references": {
+            "vessels": [{"id": 501, "name": "MSC AURORA"}],
+            "locations": [{"id": 900, "name": "Shanghai"}, {"id": 901, "name": "Rotterdam"}],
+        },
+        "containers": [
+            {
+                "number": "MSKU1234567",
+                "status": "Departed",
+                "events": [
+                    {
+                        "order_id": 1,
+                        "status": "Gate In",
+                        "date": "2026-01-01 10:00:00",
+                        "actual": True,
+                        "location": 900,  # numeric ID, not a name
+                        "vessel": 501,  # numeric ID, not a name
+                        "voyage": "123W",
+                    },
+                    {
+                        "order_id": 2,
+                        "status": "Departed",
+                        "date": "2026-01-05",
+                        "actual": True,
+                        "location": 999,  # no matching reference entry
+                        "vessel": None,
+                        "voyage": "123W",
+                    },
+                ],
+            }
+        ],
+    },
+}
+
+
+def test_parse_resolves_vessel_and_location_ids_via_references_table():
+    parsed = SeaRatesTracker._parse(SEARATES_RAW_WITH_ID_REFERENCES)
+    events = parsed["containers"][0]["events"]
+
+    assert events[0]["location"] == "Shanghai"
+    assert events[0]["vessel"] == "MSC AURORA"
+
+    # No matching reference entry - falls back to the raw value unresolved,
+    # never silently dropped.
+    assert events[1]["location"] == 999
+    assert events[1]["vessel"] is None
+
+
+def test_parse_falls_back_to_top_level_vessels_locations_when_no_references_key():
+    raw = {
+        "status": "success",
+        "data": {
+            "metadata": {},
+            "vessels": [{"id": "V1", "name": "EVER GIVEN"}],
+            "locations": [{"id": "L1", "name": "Singapore"}],
+            "containers": [
+                {
+                    "number": "X",
+                    "status": "In Transit",
+                    "events": [
+                        {"order_id": 1, "status": "Departed", "date": None, "actual": True, "location": "L1", "vessel": "V1", "voyage": None}
+                    ],
+                }
+            ],
+        },
+    }
+    parsed = SeaRatesTracker._parse(raw)
+    event = parsed["containers"][0]["events"][0]
+    assert event["location"] == "Singapore"
+    assert event["vessel"] == "EVER GIVEN"
+
+
+def test_parse_still_passes_through_already_resolved_names_unchanged():
+    """No references table at all (today's fixture shape) - names pass
+    through untouched, exactly as before this fix."""
+    raw = {
+        "status": "success",
+        "data": {
+            "metadata": {},
+            "containers": [
+                {
+                    "number": "X",
+                    "status": "In Transit",
+                    "events": [
+                        {"order_id": 1, "status": "Departed", "date": None, "actual": True, "location": "Shanghai", "vessel": "MSC AURORA", "voyage": None}
+                    ],
+                }
+            ],
+        },
+    }
+    parsed = SeaRatesTracker._parse(raw)
+    event = parsed["containers"][0]["events"][0]
+    assert event["location"] == "Shanghai"
+    assert event["vessel"] == "MSC AURORA"
+
 
 # --- SearatesHttpProvider._adapt -----------------------------------------------
 
@@ -166,13 +280,19 @@ async def test_registry_skips_providers_that_do_not_support_the_number():
 
 @pytest.mark.asyncio
 async def test_registry_returns_ok_false_when_every_provider_misses():
+    """The final miss message is customer-facing (surfaces as
+    `tracking_message`) - it must stay neutral and must never name which
+    internal providers were tried."""
     a = _FakeProvider("a", result=NormalizedTrackingResult(ok=False, error="a missed"))
     b = _FakeProvider("b", result=NormalizedTrackingResult(ok=False, error="b missed"))
 
     result = await ProviderRegistry([a, b]).track("UNKNOWN0000001")
 
     assert result.ok is False
-    assert "a" in result.error and "b" in result.error
+    assert "a" not in result.error.split() and "b" not in result.error.split()
+    assert result.error == (
+        "Container data is not yet available. Try again later or verify the container number is correct."
+    )
 
 
 @pytest.mark.asyncio

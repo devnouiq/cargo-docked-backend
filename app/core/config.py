@@ -71,11 +71,22 @@ class Settings(BaseSettings):
     stripe_secret_key: str | None = None
     stripe_webhook_secret: str | None = None
     stripe_publishable_key: str | None = None
-    # Price IDs for the two paid plans - per-environment (each Stripe
+    # Price IDs for the four paid plans - per-environment (each Stripe
     # account, test or live, has its own), not a literal constant. None
     # until set, matching stripe_price_id's existing nullable contract.
-    stripe_starter_price_id: str | None = None
-    stripe_growth_price_id: str | None = None
+    stripe_feeder_price_id: str | None = None
+    stripe_panamax_price_id: str | None = None
+    stripe_ultra_price_id: str | None = None
+    stripe_fleet_price_id: str | None = None
+    # USD counterparts - Stripe Prices are single-currency, so a plan sold
+    # in both EUR and USD needs two separate Price objects. Optional, same
+    # graceful-degradation contract: checkout-session with currency=usd
+    # raises FeatureNotConfiguredError if the matching plan's USD price id
+    # isn't set here (or on the Plan row - see app/models/billing.py).
+    stripe_feeder_price_id_usd: str | None = None
+    stripe_panamax_price_id_usd: str | None = None
+    stripe_ultra_price_id_usd: str | None = None
+    stripe_fleet_price_id_usd: str | None = None
 
     # --- transactional email (Resend) --------------------------------------
     # Optional, same pattern as Stripe above: unset means the welcome email

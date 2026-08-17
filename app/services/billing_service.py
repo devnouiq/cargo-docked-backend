@@ -30,18 +30,60 @@ logger = logging.getLogger(__name__)
 # The plans this product ships with. Seeded via `seed_default_plans()`
 # (called from scripts/init_db.py) - `stripe_price_id` is left None until
 # real Stripe Price objects are created and wired in via env; Free needs
-# no Stripe object at all, Enterprise is negotiated manually. Starter/
-# Growth prices come from settings, not a literal string here, because
-# every environment (local dev, staging, prod) has its own Stripe
-# account with its own Price IDs - see STRIPE_STARTER_PRICE_ID/
-# STRIPE_GROWTH_PRICE_ID in .env.example.
+# no Stripe object at all, Enterprise is negotiated manually. The four
+# paid tiers' prices come from settings, not a literal string here,
+# because every environment (local dev, staging, prod) has its own
+# Stripe account with its own Price IDs - see STRIPE_FEEDER_PRICE_ID etc.
+# in .env.example. Superseded the old two-tier Starter/Growth lineup -
+# see _RETIRED_PLAN_CODES below and seed_default_plans().
 def _default_plans() -> list[dict]:
     return [
         {"code": "free", "name": "Free", "monthly_price_cents": 0, "included_credits": 1_000},
-        {"code": "starter", "name": "Starter", "monthly_price_cents": 4_900, "included_credits": 10_000, "stripe_price_id": settings.stripe_starter_price_id},
-        {"code": "growth", "name": "Growth", "monthly_price_cents": 19_900, "included_credits": 50_000, "stripe_price_id": settings.stripe_growth_price_id},
+        # USD prices are clean round numbers roughly matching the EUR tiers
+        # (~EUR * 1.10-1.12, then rounded to a tidy figure) - not a precise
+        # FX conversion, since this product doesn't dynamically reprice by
+        # exchange rate; pick a number, keep it stable, adjust manually if
+        # it ever drifts too far from real EUR/USD parity.
+        {
+            "code": "feeder", "name": "Feeder", "monthly_price_cents": 5_000, "monthly_price_cents_usd": 5_500,
+            "included_credits": 1_500, "stripe_price_id": settings.stripe_feeder_price_id,
+            "stripe_price_id_usd": settings.stripe_feeder_price_id_usd,
+        },
+        {
+            "code": "panamax", "name": "Panamax", "monthly_price_cents": 12_000, "monthly_price_cents_usd": 13_000,
+            "included_credits": 4_500, "stripe_price_id": settings.stripe_panamax_price_id,
+            "stripe_price_id_usd": settings.stripe_panamax_price_id_usd,
+        },
+        {
+            "code": "ultra", "name": "Ultra", "monthly_price_cents": 23_000, "monthly_price_cents_usd": 25_000,
+            "included_credits": 10_000, "stripe_price_id": settings.stripe_ultra_price_id,
+            "stripe_price_id_usd": settings.stripe_ultra_price_id_usd,
+        },
+        {
+            "code": "fleet", "name": "Fleet", "monthly_price_cents": 36_000, "monthly_price_cents_usd": 40_000,
+            "included_credits": 18_000, "stripe_price_id": settings.stripe_fleet_price_id,
+            "stripe_price_id_usd": settings.stripe_fleet_price_id_usd,
+        },
         {"code": "enterprise", "name": "Enterprise", "monthly_price_cents": 0, "included_credits": 500_000},
     ]
+
+
+# Retired plan codes from the old two-tier lineup - seed_default_plans()
+# removes these on every run (safe: only ever referenced by a Subscription
+# FK, and this product has no way to have live subscriptions on a plan
+# code no longer offered in _default_plans() without a human migrating
+# them first). Keeping this list explicit rather than "delete anything not
+# in _default_plans()" avoids silently deleting a plan someone added by
+# hand for a manual/negotiated deal.
+_RETIRED_PLAN_CODES = ("starter", "growth")
+
+
+# Pay-per-credit top-up rate, in cents - same rate applied to both EUR and
+# USD for simplicity (this product doesn't track live FX rates; see the
+# _default_plans() USD-pricing comment for the same reasoning applied to
+# subscription plans). Matches the frontend's PAY_PER_CREDIT_RATE = 0.05
+# (src/data/plans.js, src/app/pricing/page.js in the frontend repo).
+CREDIT_RATE_CENTS_PER_CREDIT = 5
 
 
 def _require_stripe() -> None:
@@ -50,11 +92,34 @@ def _require_stripe() -> None:
     stripe.api_key = settings.stripe_secret_key
 
 
+def _vat_type_for(vat_number: str) -> str:
+    """Stripe requires a specific `type` per tax-id format
+    (https://docs.stripe.com/billing/customer/tax-ids#supported-tax-id).
+    This is a simple, deliberately non-exhaustive heuristic covering the
+    common cases this product expects (EU B2B reverse-charge, plus the
+    UK since it looks identical to an EU VAT number but isn't one anymore
+    post-Brexit) - not a full country/format validator."""
+    prefix = vat_number.strip().upper()[:2]
+    if prefix == "GB":
+        return "gb_vat"
+    return "eu_vat"
+
+
 def seed_default_plans(db: Session) -> None:
     for plan_data in _default_plans():
         existing = db.query(Plan).filter_by(code=plan_data["code"]).one_or_none()
         if existing is None:
             db.add(Plan(**plan_data))
+        else:
+            for field, value in plan_data.items():
+                setattr(existing, field, value)
+    for retired_code in _RETIRED_PLAN_CODES:
+        retired = db.query(Plan).filter_by(code=retired_code).one_or_none()
+        if retired is None:
+            continue
+        still_in_use = db.query(Subscription).filter_by(plan_id=retired.id).first() is not None
+        if not still_in_use:
+            db.delete(retired)
     db.commit()
 
 
@@ -79,24 +144,71 @@ class BillingService:
     def get_subscription_by_stripe_id(self, db: Session, stripe_subscription_id: str) -> Subscription | None:
         return db.query(Subscription).filter_by(stripe_subscription_id=stripe_subscription_id).one_or_none()
 
+    def _ensure_customer_with_tax_id(
+        self, *, customer_id: str | None, organization_id: uuid.UUID, email: str | None, vat_number: str
+    ) -> str:
+        """A tax ID must attach to a persisted Stripe Customer, not to a
+        not-yet-created one - Checkout normally creates the Customer
+        implicitly on first purchase, which is too late for us to attach a
+        tax ID to it before the session starts. So when a VAT number is
+        supplied, create the Customer explicitly up front (if the org
+        doesn't already have one) and attach the tax ID to it here."""
+        try:
+            if not customer_id:
+                customer = stripe.Customer.create(email=email, metadata={"organization_id": str(organization_id)})
+                customer_id = customer.id
+            stripe.Customer.create_tax_id(customer_id, type=_vat_type_for(vat_number), value=vat_number)
+        except stripe.StripeError as exc:
+            logger.warning("stripe VAT tax id attach failed for org %s: %s", organization_id, exc)
+            raise UpstreamProviderError(f"Could not record VAT number: {exc.user_message or str(exc)}") from exc
+        return customer_id
+
     def create_checkout_session(
-        self, db: Session, *, organization_id: uuid.UUID, plan_code: str, success_url: str, cancel_url: str
+        self,
+        db: Session,
+        *,
+        organization_id: uuid.UUID,
+        plan_code: str,
+        success_url: str,
+        cancel_url: str,
+        currency: str = "eur",
+        vat_number: str | None = None,
+        customer_email: str | None = None,
     ) -> str:
         _require_stripe()
         plan = db.query(Plan).filter_by(code=plan_code).one_or_none()
         if plan is None:
             raise NotFoundError(f"Unknown plan {plan_code!r}.")
-        if not plan.stripe_price_id:
-            raise FeatureNotConfiguredError(f"Plan {plan_code!r} has no Stripe price configured yet.")
+        price_id = plan.stripe_price_id if currency == "eur" else plan.stripe_price_id_usd
+        if not price_id:
+            raise FeatureNotConfiguredError(
+                f"Plan {plan_code!r} has no Stripe price configured for currency {currency!r} yet."
+            )
 
         subscription = self.get_subscription(db, organization_id)
+        customer_id = subscription.stripe_customer_id if subscription else None
+        if vat_number:
+            customer_id = self._ensure_customer_with_tax_id(
+                customer_id=customer_id, organization_id=organization_id, email=customer_email, vat_number=vat_number
+            )
+
+        # automatic_tax requires an address to calculate against. A brand-new
+        # Checkout-created customer collects one automatically, but an
+        # existing `customer_id` (the VAT path above, or a returning
+        # subscriber) may have no address on file yet - `customer_update`
+        # tells Stripe to save the billing address entered in Checkout back
+        # onto the Customer, which is also what lets tax calculation use it.
+        # Stripe rejects `customer_update` when no `customer` is set, hence
+        # the conditional.
+        customer_update = {"address": "auto", "name": "auto"} if customer_id else None
         try:
             session = stripe.checkout.Session.create(
                 mode="subscription",
-                line_items=[{"price": plan.stripe_price_id, "quantity": 1}],
+                line_items=[{"price": price_id, "quantity": 1}],
                 success_url=success_url,
                 cancel_url=cancel_url,
-                customer=subscription.stripe_customer_id if subscription else None,
+                customer=customer_id,
+                customer_update=customer_update,
                 client_reference_id=str(organization_id),
                 metadata={"organization_id": str(organization_id), "plan_code": plan_code},
                 # Stripe does NOT copy the Checkout Session's client_reference_id/
@@ -107,15 +219,95 @@ class BillingService:
                 # set here too or every subscription.* webhook after the first
                 # checkout is unattributable.
                 subscription_data={"metadata": {"organization_id": str(organization_id), "plan_code": plan_code}},
+                # Always show the VAT/tax-id field in Checkout, regardless of
+                # whether the caller supplied one up front - a customer can
+                # still add it in the Stripe-hosted UI. automatic_tax is what
+                # actually applies EU B2B reverse-charge once a valid tax ID
+                # is on the customer - requires Stripe Tax to be enabled on
+                # the connected account; if it isn't (common in a fresh test
+                # account), this call fails and surfaces as UpstreamProviderError
+                # below rather than silently skipping tax handling.
+                tax_id_collection={"enabled": True},
+                automatic_tax={"enabled": True},
             )
         except stripe.StripeError as exc:
             # e.g. a plan's stripe_price_id pointing at a Price that doesn't
-            # exist (wrong mode, wrong account, deleted/archived) - Stripe's
-            # own message already says exactly what's wrong, so surface it
-            # rather than a generic one, but as a typed 502, not a raw 500.
+            # exist (wrong mode, wrong account, deleted/archived), or Stripe
+            # Tax not enabled on the account for automatic_tax - Stripe's own
+            # message already says exactly what's wrong, so surface it rather
+            # than a generic one, but as a typed 502, not a raw 500.
             logger.warning("stripe checkout session creation failed for plan %r: %s", plan_code, exc)
             raise UpstreamProviderError(f"Could not start checkout: {exc.user_message or str(exc)}") from exc
         return session.url
+
+    def create_credit_checkout_session(
+        self,
+        db: Session,
+        *,
+        organization_id: uuid.UUID,
+        credits: int,
+        success_url: str,
+        cancel_url: str,
+        currency: str = "eur",
+        vat_number: str | None = None,
+        customer_email: str | None = None,
+    ) -> str:
+        """One-off pay-per-credit top-up. Unlike subscription checkout,
+        there's no fixed Stripe Price per amount (credit counts vary
+        continuously) - so this uses Stripe's inline ad-hoc pricing
+        (`price_data`) instead of a `price` id, priced at
+        CREDIT_RATE_CENTS_PER_CREDIT per credit. `metadata.type =
+        "credit_purchase"` is how the webhook handler
+        (routers/v1/billing.py) tells this apart from a subscription
+        checkout on `checkout.session.completed`."""
+        _require_stripe()
+
+        subscription = self.get_subscription(db, organization_id)
+        customer_id = subscription.stripe_customer_id if subscription else None
+        if vat_number:
+            customer_id = self._ensure_customer_with_tax_id(
+                customer_id=customer_id, organization_id=organization_id, email=customer_email, vat_number=vat_number
+            )
+
+        unit_amount = round(credits * CREDIT_RATE_CENTS_PER_CREDIT)
+        # See create_checkout_session - automatic_tax needs an address, and
+        # an existing customer_id (the VAT path above) may not have one yet.
+        customer_update = {"address": "auto", "name": "auto"} if customer_id else None
+        try:
+            session = stripe.checkout.Session.create(
+                mode="payment",
+                line_items=[
+                    {
+                        "price_data": {
+                            "currency": currency,
+                            "product_data": {"name": f"{credits} tracking credits"},
+                            "unit_amount": unit_amount,
+                        },
+                        "quantity": 1,
+                    }
+                ],
+                success_url=success_url,
+                cancel_url=cancel_url,
+                customer=customer_id,
+                customer_update=customer_update,
+                client_reference_id=str(organization_id),
+                metadata={"organization_id": str(organization_id), "credits": str(credits), "type": "credit_purchase"},
+                tax_id_collection={"enabled": True},
+                automatic_tax={"enabled": True},
+            )
+        except stripe.StripeError as exc:
+            logger.warning("stripe credit checkout session creation failed for org %s: %s", organization_id, exc)
+            raise UpstreamProviderError(f"Could not start checkout: {exc.user_message or str(exc)}") from exc
+        return session.url
+
+    def apply_credit_purchase(self, db: Session, *, organization_id: uuid.UUID, credits: int) -> None:
+        """Called from the `checkout.session.completed` webhook for a
+        `type=credit_purchase` session - additively tops up the org's
+        credit balance. NOT the same as `refill_credits_for_invoice`/
+        `upsert_subscription_from_stripe_object`'s reset-to-allotment
+        behavior; a one-off purchase stacks on top of whatever's already
+        there."""
+        UsageService().add_credits(db, organization_id, credits)
 
     def _require_customer_id(self, db: Session, organization_id: uuid.UUID) -> str:
         subscription = self.get_subscription(db, organization_id)

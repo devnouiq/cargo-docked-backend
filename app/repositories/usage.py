@@ -50,6 +50,22 @@ class UsageRepository:
         db.refresh(balance)
         return balance
 
+    def add_credits(self, db: Session, organization_id: uuid.UUID, amount: int) -> bool:
+        """Atomically increment `credits_remaining` by `amount` - additive,
+        unlike `set_plan_allotment` (which resets to a fixed value on
+        subscription renewal/change). Used for one-off pay-per-credit
+        purchases, which stack on top of whatever a subscription already
+        provided. Same atomic-UPDATE pattern as `try_deduct_credits` for
+        the same race-safety reason - caller must ensure the balance row
+        exists first (`get_or_create_balance`)."""
+        result = db.execute(
+            update(CreditBalance)
+            .where(CreditBalance.organization_id == organization_id)
+            .values(credits_remaining=CreditBalance.credits_remaining + amount)
+        )
+        db.commit()
+        return result.rowcount > 0
+
     def try_deduct_credits(self, db: Session, organization_id: uuid.UUID, amount: int) -> bool:
         """Atomically deduct `amount` credits iff the org has enough.
         Returns whether the deduction succeeded."""

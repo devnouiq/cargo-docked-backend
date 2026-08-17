@@ -372,10 +372,68 @@ class SeaRatesTracker:
 
     # --- response parsing -------------------------------------------------
     @staticmethod
+    def _build_id_name_lookup(entries: object) -> dict:
+        """Build an `id -> name` lookup out of a list of reference entries
+        (typically `{id, name}` or `{id, type, name}`). Tolerant of anything
+        that isn't shaped like that - unrecognized entries are just skipped,
+        never raised on, since this is a best-effort resolution layer.
+
+        Keys are stored under both the entry's native id type and its
+        string form, since we don't know up front whether events reference
+        it as an int or a str.
+        """
+        lookup: dict = {}
+        if not isinstance(entries, list):
+            return lookup
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = entry.get("id")
+            name = entry.get("name")
+            if entry_id is None or not name:
+                continue
+            lookup[entry_id] = name
+            lookup.setdefault(str(entry_id), name)
+        return lookup
+
+    @staticmethod
     def _parse(raw: dict) -> dict:
-        """Flatten SeaRates' response into a clean, stable shape."""
+        """Flatten SeaRates' response into a clean, stable shape.
+
+        NOTE on touching this file despite the module's "do not modify" load-
+        tested-auth/HTTP/rate-limit/proxy notice: this is a scoped
+        output-parsing correctness fix only (resolving vessel/location
+        reference IDs to names below) - none of the session/token/proxy/
+        rate-limit mechanics above this method are touched.
+        """
         data = raw.get("data", {}) or {}
         meta = data.get("metadata", {}) or {}
+
+        # Some SeaRates responses reference vessels/locations by numeric ID
+        # into a separate lookup table instead of embedding the name inline
+        # on each event - without resolving it, events end up showing a raw
+        # ID where a name belongs. We don't have a captured real payload for
+        # this shape, so this defensively tries a few plausible key names
+        # and falls back to the raw (unresolved) value if none match -
+        # never worse than the previous unconditional passthrough.
+        references = data.get("references")
+        vessel_lookup: dict = {}
+        location_lookup: dict = {}
+        if isinstance(references, dict):
+            vessel_lookup = SeaRatesTracker._build_id_name_lookup(references.get("vessels"))
+            location_lookup = SeaRatesTracker._build_id_name_lookup(references.get("locations"))
+        elif isinstance(references, list):
+            vessel_lookup = SeaRatesTracker._build_id_name_lookup(
+                [e for e in references if isinstance(e, dict) and e.get("type") == "vessel"]
+            )
+            location_lookup = SeaRatesTracker._build_id_name_lookup(
+                [e for e in references if isinstance(e, dict) and e.get("type") == "location"]
+            )
+        if not vessel_lookup:
+            vessel_lookup = SeaRatesTracker._build_id_name_lookup(data.get("vessels"))
+        if not location_lookup:
+            location_lookup = SeaRatesTracker._build_id_name_lookup(data.get("locations"))
+
         out: dict = {
             "status": raw.get("status", "error"),
             "message": raw.get("message", ""),
@@ -403,8 +461,8 @@ class SeaRatesTracker:
                             "status": e.get("status"),
                             "date": e.get("date"),
                             "actual": e.get("actual"),
-                            "location": e.get("location"),
-                            "vessel": e.get("vessel"),
+                            "location": location_lookup.get(e.get("location"), e.get("location")),
+                            "vessel": vessel_lookup.get(e.get("vessel"), e.get("vessel")),
                             "voyage": e.get("voyage"),
                         }
                         for e in (c.get("events", []) or [])

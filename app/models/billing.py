@@ -30,14 +30,26 @@ class SubscriptionStatus(enum.StrEnum):
 class Plan(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "plans"
 
-    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # free, starter, growth, enterprise
+    code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)  # free, feeder, panamax, ultra, fleet, enterprise
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     monthly_price_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # USD variant of monthly_price_cents - nullable for the same reason
+    # stripe_price_id_usd is nullable (Free/Enterprise have no Stripe price
+    # in either currency; a paid plan may not have a USD price
+    # configured in every environment yet). EUR (monthly_price_cents) stays
+    # the non-nullable "default" currency column since it's the one every
+    # plan has always had.
+    monthly_price_cents_usd: Mapped[int | None] = mapped_column(Integer, nullable=True)
     included_credits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Null for the Free plan (no Stripe object needed) and for Enterprise
     # (negotiated manually) - both valid, so this stays optional rather
     # than every plan requiring a live Stripe Price.
     stripe_price_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # USD counterpart of stripe_price_id - a separate Stripe Price object
+    # (Stripe Prices are single-currency), optional until one's created in
+    # a given environment's Stripe account and wired in via env
+    # (STRIPE_STARTER_PRICE_ID_USD/STRIPE_GROWTH_PRICE_ID_USD).
+    stripe_price_id_usd: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 class Subscription(UUIDPrimaryKeyMixin, TimestampMixin, Base):

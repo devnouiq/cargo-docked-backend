@@ -53,5 +53,13 @@ class UsageService:
     def set_plan_allotment(self, db: Session, organization_id: uuid.UUID, *, included_credits: int) -> CreditBalance:
         return self.repo.set_plan_allotment(db, organization_id, included_credits=included_credits)
 
+    def add_credits(self, db: Session, organization_id: uuid.UUID, credits: int) -> CreditBalance:
+        """Additive top-up (pay-per-credit purchase) - NOT a reset like
+        `set_plan_allotment`. Ensures the balance row exists first (a brand
+        new org with no subscription yet can still buy credits)."""
+        self.repo.get_or_create_balance(db, organization_id)
+        self.repo.add_credits(db, organization_id, credits)
+        return self.repo.get_or_create_balance(db, organization_id)
+
     def list_events(self, db: Session, organization_id: uuid.UUID, *, limit: int = 50, offset: int = 0):
         return self.repo.list_events(db, organization_id, limit=limit, offset=offset)

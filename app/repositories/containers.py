@@ -74,7 +74,6 @@ class ContainerRepository:
         """Update summary fields + append any events not already recorded
         (matched by event_code + occurred_at, since providers don't hand
         back stable event IDs we can dedupe on)."""
-        container.provider_name = result.provider_name
         container.status = result.status or container.status
         container.last_known_location = result.location or container.last_known_location
         container.vessel = result.vessel or container.vessel

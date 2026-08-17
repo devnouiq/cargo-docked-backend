@@ -31,7 +31,7 @@ def _queued_container(db_session, *, organization_id, number: str) -> TrackedCon
     container, _created = _containers.get_or_create(
         db_session, organization_id=organization_id, container_number=number
     )
-    container.scrape_status = ContainerScrapeStatus.QUEUED
+    container.tracking_status = ContainerScrapeStatus.QUEUED
     db_session.commit()
     return container
 
@@ -56,8 +56,8 @@ async def test_scrape_applies_provider_result_and_marks_succeeded(db_session, ap
     await scrape_container({}, str(container.id))
 
     refreshed = _reload(db_session, container.id)
-    assert refreshed.scrape_status == ContainerScrapeStatus.SUCCEEDED
-    assert refreshed.scrape_error is None
+    assert refreshed.tracking_status == ContainerScrapeStatus.COMPLETED
+    assert refreshed.tracking_message is None
     assert refreshed.status == "In Transit"
     assert refreshed.last_known_location == "Rotterdam"
     assert refreshed.last_polled_at is not None
@@ -74,9 +74,14 @@ async def test_unresolvable_container_is_no_data_not_failed(db_session, api_key)
     await scrape_container({}, str(container.id))
 
     refreshed = _reload(db_session, container.id)
-    assert refreshed.scrape_status == ContainerScrapeStatus.NO_DATA
-    assert refreshed.scrape_status != ContainerScrapeStatus.FAILED
-    assert refreshed.scrape_error == "not found by fake provider"
+    assert refreshed.tracking_status == ContainerScrapeStatus.NO_DATA
+    assert refreshed.tracking_status != ContainerScrapeStatus.FAILED
+    # Customer-safe, neutral message - never the raw provider error string
+    # (that stays server-side, in raw_data["last_error"]).
+    assert refreshed.tracking_message == (
+        "Container data is not yet available. Try again later or verify the container number is correct."
+    )
+    assert refreshed.raw_data.get("last_error") == "not found by fake provider"
     assert refreshed.status is None  # nothing to show yet, and nothing blanked out
 
 
@@ -106,8 +111,12 @@ async def test_scrape_marks_failed_without_propagating_when_apply_raises(db_sess
     await scrape_container({}, str(container.id))
 
     refreshed = _reload(db_session, container.id)
-    assert refreshed.scrape_status == ContainerScrapeStatus.FAILED
-    assert "provider result exploded" in refreshed.scrape_error
+    assert refreshed.tracking_status == ContainerScrapeStatus.FAILED
+    # Customer-safe, neutral message - never the raw exception text (that
+    # stays server-side, in raw_data["last_error"]).
+    assert refreshed.tracking_message == "We couldn't update this container's tracking status. Please try again shortly."
+    assert "provider result exploded" not in refreshed.tracking_message
+    assert refreshed.raw_data.get("last_error") == "provider result exploded"
 
 
 @pytest.mark.asyncio
@@ -125,5 +134,5 @@ async def test_scrape_of_a_deactivated_container_is_a_clean_noop(db_session, api
     await scrape_container({}, str(container.id))
 
     refreshed = _reload(db_session, container.id)
-    assert refreshed.scrape_status == ContainerScrapeStatus.QUEUED  # untouched
+    assert refreshed.tracking_status == ContainerScrapeStatus.QUEUED  # untouched
     assert refreshed.status is None

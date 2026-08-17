@@ -61,11 +61,11 @@ async def start_tracking_bulk(
 
     This endpoint returns as soon as the containers are registered and
     charged - it does not wait for the carrier data. Each returned container
-    comes back with `scrape_status: "queued"` and `status: null`; a
+    comes back with `tracking_status: "queued"` and `status: null`; a
     background worker resolves them shortly afterwards.
 
     To get results, either poll `GET /v1/containers/{number}` until
-    `scrape_status` is terminal (`succeeded`, `no_data` or `failed`), or
+    `tracking_status` is terminal (`completed`, `no_data` or `failed`), or
     subscribe to the `container.updated` webhook.
 
     Duplicate numbers within one payload are collapsed: one row, one credit,
@@ -105,7 +105,7 @@ async def refresh_container(
 ):
     """Queue a fresh scrape of an already-tracked container.
 
-    Returns immediately with `scrape_status: "queued"`; the worker does the
+    Returns immediately with `tracking_status: "queued"`; the worker does the
     actual lookup. Charges one credit - except when a scrape is already
     pending (`queued`/`in_progress`), in which case the existing container
     is returned unchanged and nothing is charged or re-queued.

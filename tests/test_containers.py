@@ -83,7 +83,7 @@ def test_bulk_tracking_queues_every_number_without_scraping_inline(client, api_k
     results = {r["container_number"]: r for r in body["results"]}
     for number in ("MSKU4444444", "MISS0000001"):
         assert results[number]["ok"] is True
-        assert results[number]["container"]["scrape_status"] == "queued"
+        assert results[number]["container"]["tracking_status"] == "queued"
         assert results[number]["container"]["status"] is None  # nothing scraped yet
 
     # The whole point of the change: the request no longer blocks on a
@@ -161,7 +161,7 @@ def test_bulk_survives_the_arq_pool_being_unreachable(client, api_key, monkeypat
 
     listed = client.get("/v1/containers", headers={"X-API-Key": api_key}).json()
     assert listed["total"] == 1
-    assert listed["items"][0]["scrape_status"] == "queued"
+    assert listed["items"][0]["tracking_status"] == "queued"
 
 
 def test_bulk_rejects_items_it_cannot_charge_for(client, api_key, db_session, fake_arq_pool):
@@ -194,13 +194,13 @@ def test_refresh_endpoint_charges_and_enqueues_once(client, api_key, fake_arq_po
         "/v1/containers", json={"container_number": "MSKU7777777"}, headers={"X-API-Key": api_key}
     )
     assert created.status_code == 201, created.text
-    assert created.json()["scrape_status"] == "succeeded"  # sync POST scraped inline
+    assert created.json()["tracking_status"] == "completed"  # sync POST scraped inline
     fake_arq_pool.enqueued.clear()
 
     before = client.get("/v1/usage", headers={"X-API-Key": api_key}).json()["credits_remaining"]
     resp = client.post("/v1/containers/MSKU7777777/refresh", headers={"X-API-Key": api_key})
     assert resp.status_code == 202, resp.text
-    assert resp.json()["scrape_status"] == "queued"
+    assert resp.json()["tracking_status"] == "queued"
 
     assert len(fake_arq_pool.enqueued) == 1
     name, args, _kwargs = fake_arq_pool.enqueued[0]
@@ -219,7 +219,7 @@ def test_refresh_is_idempotent_while_a_scrape_is_still_pending(client, api_key, 
     again = client.post("/v1/containers/MSKU7777777/refresh", headers={"X-API-Key": api_key})
 
     assert again.status_code == 202, again.text
-    assert again.json()["scrape_status"] == "queued"
+    assert again.json()["tracking_status"] == "queued"
     assert fake_arq_pool.enqueued == []
     assert client.get("/v1/usage", headers={"X-API-Key": api_key}).json()["credits_remaining"] == before
 

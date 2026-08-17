@@ -37,7 +37,6 @@ class ContainerOut(BaseModel):
     container_number: str
     reference: str | None
     carrier_scac: str | None
-    provider_name: str | None
     status: str | None
     last_known_location: str | None
     vessel: str | None
@@ -47,9 +46,9 @@ class ContainerOut(BaseModel):
     last_free_day: datetime | None
     is_active: bool
     last_polled_at: datetime | None
-    # Our own scrape lifecycle - not the carrier's `status` above.
-    scrape_status: ContainerScrapeStatus
-    scrape_error: str | None
+    # Our own tracking lifecycle - not the carrier's `status` above.
+    tracking_status: ContainerScrapeStatus
+    tracking_message: str | None
     created_at: datetime
     updated_at: datetime
 

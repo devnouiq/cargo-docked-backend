@@ -6,7 +6,7 @@ and notify webhooks when something meaningful changed.
 `scrape_container` job queued by `queue_bulk()`/`request_refresh()`) both
 end at the same `_refresh_and_apply` step, so "a customer looked it up"
 and "the worker drained the queue" produce identical downstream behavior -
-persisted state, `scrape_status` transitions and webhook events alike.
+persisted state, `tracking_status` transitions and webhook events alike.
 
 The one thing that differs between them is billing: the API layer charges
 at submission time, so the worker path must charge nothing (see
@@ -35,6 +35,14 @@ from .usage_service import UsageService
 from .webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
+
+# Customer-safe messages for the two terminal non-success states. Deliberately
+# generic - never mention provider names, internal exception classes, or raw
+# HTTP client errors (the full diagnostic detail still lands in
+# `container.raw_data["last_error"]`, an internal-only field never returned
+# by ContainerOut).
+_NO_DATA_MESSAGE = "Container data is not yet available. Try again later or verify the container number is correct."
+_FAILED_MESSAGE = "We couldn't update this container's tracking status. Please try again shortly."
 
 
 def _infer_webhook_events(*, previous_status: str | None, result: NormalizedTrackingResult, new_event_codes: list[str]) -> list[WebhookEventType]:
@@ -171,8 +179,8 @@ class ContainerService:
                 container, _created = self.containers.get_or_create(
                     db, organization_id=organization_id, container_number=number
                 )
-                container.scrape_status = ContainerScrapeStatus.QUEUED
-                container.scrape_error = None
+                container.tracking_status = ContainerScrapeStatus.QUEUED
+                container.tracking_message = None
                 db.commit()
             except AppError as exc:  # quota exceeded, etc - isolate this item
                 db.rollback()
@@ -208,7 +216,7 @@ class ContainerService:
                 "POST /v1/containers to start tracking it."
             )
 
-        if container.scrape_status in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS):
+        if container.tracking_status in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS):
             return container
 
         self.usage.charge(
@@ -218,8 +226,8 @@ class ContainerService:
             event_type=UsageEventType.CONTAINER_LOOKUP,
             container_number=container.container_number,
         )
-        container.scrape_status = ContainerScrapeStatus.QUEUED
-        container.scrape_error = None
+        container.tracking_status = ContainerScrapeStatus.QUEUED
+        container.tracking_message = None
         db.commit()
         db.refresh(container)
 
@@ -279,7 +287,7 @@ class ContainerService:
 
             # Commit IN_PROGRESS before the (slow) provider call so a client
             # polling mid-scrape sees it, rather than a stale `queued`.
-            container.scrape_status = ContainerScrapeStatus.IN_PROGRESS
+            container.tracking_status = ContainerScrapeStatus.IN_PROGRESS
             db.commit()
 
             try:
@@ -291,8 +299,13 @@ class ContainerService:
                 db.rollback()
                 failed = db.get(TrackedContainer, container_id)
                 if failed is not None:
-                    failed.scrape_status = ContainerScrapeStatus.FAILED
-                    failed.scrape_error = str(exc)[:500]
+                    failed.tracking_status = ContainerScrapeStatus.FAILED
+                    # Customer-safe message only - the raw exception (which may
+                    # name an internal exception class or an HTTP client error)
+                    # stays server-side: it's re-raised below, and the arq task
+                    # (workers/tasks/scrape.py) logs it via logger.exception.
+                    failed.tracking_message = _FAILED_MESSAGE
+                    failed.raw_data = {**(failed.raw_data or {}), "last_error": str(exc)[:500]}
                     db.commit()
                 raise
 
@@ -307,15 +320,18 @@ class ContainerService:
             logger.info("no provider resolved %s: %s", container.container_number, result.error)
             container.raw_data = {**(container.raw_data or {}), "last_error": result.error}
             container.last_polled_at = datetime.now(timezone.utc)
-            container.scrape_status = ContainerScrapeStatus.NO_DATA
-            container.scrape_error = (result.error or "")[:500]
+            container.tracking_status = ContainerScrapeStatus.NO_DATA
+            # Customer-safe, provider-agnostic message - the raw diagnostic
+            # (which may name a provider or an internal error string) stays
+            # in raw_data, an internal-only field ContainerOut never returns.
+            container.tracking_message = _NO_DATA_MESSAGE
             db.flush()
             return
 
         new_events = self.containers.apply_provider_result(db, container, result=result)
         container.last_polled_at = datetime.now(timezone.utc)
-        container.scrape_status = ContainerScrapeStatus.SUCCEEDED
-        container.scrape_error = None
+        container.tracking_status = ContainerScrapeStatus.COMPLETED
+        container.tracking_message = None
         db.flush()
 
         event_types = _infer_webhook_events(
@@ -331,7 +347,6 @@ class ContainerService:
                     "container_number": container.container_number,
                     "status": container.status,
                     "location": container.last_known_location,
-                    "provider": container.provider_name,
                     "occurred_at": datetime.now(timezone.utc).isoformat(),
                 },
             )

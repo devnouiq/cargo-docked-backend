@@ -8,15 +8,21 @@ synchronous `httpx.Client`, not `AsyncClient`, since every caller
 (AuthService) is itself sync - see CLAUDE.md on the sync-SQLAlchemy
 convention.
 
-`_require_resend()` mirrors `_require_stripe()` in billing_service.py,
-but the similarity ends there: Stripe routes are allowed to 503 when
-unconfigured, email must not work that way. A broken/unconfigured Resend
-key must never fail signup, and forgot-password must always look the
-same whether or not the send actually happened (otherwise the response
-becomes an account-enumeration oracle). Callers (AuthService) are
-responsible for wrapping every call here in try/except - nothing in this
-module swallows errors itself, so failures are still visible to logs/tests
-that call these functions directly.
+`_require_resend()` mirrors `_require_stripe()` in billing_service.py.
+For the welcome/password-reset emails, the similarity ends there: those
+are side effects of a bigger operation (signup/forgot-password), so a
+broken/unconfigured Resend key must never fail that operation, and
+forgot-password must always look the same whether or not the send
+actually happened (otherwise the response becomes an
+account-enumeration oracle) - callers (AuthService) wrap those two calls
+in try/except themselves. `send_contact_notification` (the contact-form
+endpoint) is different: sending the notification *is* the entire point
+of that request, so its caller (ContactService) deliberately does NOT
+swallow `FeatureNotConfiguredError` - it's left to propagate up to the
+global `AppError` handler (core/errors.py), which turns it into a clean
+HTTP 503 instead of a 500. Either way, nothing in this module swallows
+errors itself, so failures are still visible to logs/tests that call
+these functions directly.
 """
 
 from __future__ import annotations
@@ -88,3 +94,23 @@ def send_password_reset_email(*, to_email: str, reset_url: str, ttl_minutes: int
     </div>
     """
     _send(to_email=to_email, subject="Reset your CargoTrack password", html=html)
+
+
+def send_contact_notification(*, name: str, email: str, company: str | None, message: str) -> None:
+    """Notifies the support inbox (`settings.resend_from_email`, also used
+    as the `from` address - there's only one configured mailbox in this
+    environment) of a new contact-form submission. Unlike the two emails
+    above, this is sent to the *team*, not the visitor who submitted the
+    form - see ContactService for why an unconfigured Resend key is
+    allowed to surface as a 503 here instead of being swallowed."""
+    company_line = f"<p style=\"color: #374151; font-size: 14px;\"><strong>Company:</strong> {company}</p>" if company else ""
+    html = f"""
+    <div style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto;">
+      <h1 style="color: #111827; font-size: 20px;">New contact form submission</h1>
+      <p style="color: #374151; font-size: 14px;"><strong>Name:</strong> {name}</p>
+      <p style="color: #374151; font-size: 14px;"><strong>Email:</strong> {email}</p>
+      {company_line}
+      <p style="color: #374151; font-size: 14px; line-height: 1.6; white-space: pre-wrap;">{message}</p>
+    </div>
+    """
+    _send(to_email=settings.resend_from_email, subject=f"Contact form: {name}", html=html)

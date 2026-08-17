@@ -248,8 +248,15 @@ class ProviderRegistry:
                 return result
             logger.info("provider %s missed %s: %s", provider.name, container_number, result.error)
 
+        # Customer-safe message only - it must never name which internal
+        # providers were tried (that's an internal implementation detail,
+        # not something a customer integration should see or depend on).
+        # The attempted-providers list is still available server-side via
+        # the "provider %s missed" log lines just above, for debugging.
+        logger.info("no provider resolved %s (tried: %s)", container_number, ", ".join(attempted) or "none")
         return NormalizedTrackingResult(
-            ok=False, error=f"no provider resolved this container (tried: {', '.join(attempted) or 'none'})"
+            ok=False,
+            error="Container data is not yet available. Try again later or verify the container number is correct.",
         )
 
 
