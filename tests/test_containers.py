@@ -11,6 +11,25 @@ def test_start_tracking_creates_container(client, api_key, _fake_provider_regist
     assert "MSKU1234567" in _fake_provider_registry.calls
 
 
+def test_start_tracking_a_miss_is_no_data_not_failed_synchronously_too(client, api_key, _fake_provider_registry):
+    """POST /v1/containers calls ContainerService.track(), which runs
+    `_refresh_and_apply` synchronously in the request (unlike bulk, which
+    defers to the worker) - same underlying function as
+    test_unresolvable_container_is_no_data_not_failed
+    (test_container_scrape_worker.py), but exercised via the HTTP layer
+    this time to confirm the response body itself is correct, not just the
+    DB row."""
+    resp = client.post("/v1/containers", json={"container_number": "MISS0000001"}, headers={"X-API-Key": api_key})
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["tracking_status"] == "no_data"
+    assert body["tracking_status"] != "failed"
+    assert body["status"] is None  # nothing to show yet, and nothing blanked out
+    assert body["tracking_message"] == (
+        "Container data is not yet available. Try again later or verify the container number is correct."
+    )
+
+
 def test_get_untracked_container_is_404(client, api_key):
     resp = client.get("/v1/containers/NOPE0000000", headers={"X-API-Key": api_key})
     assert resp.status_code == 404
