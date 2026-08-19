@@ -39,7 +39,7 @@ from . import email_service
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SIGNUP_CREDITS = 1000
+DEFAULT_SIGNUP_CREDITS = 10
 
 
 def _slugify(name: str) -> str:

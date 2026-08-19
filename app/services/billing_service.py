@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # see _RETIRED_PLAN_CODES below and seed_default_plans().
 def _default_plans() -> list[dict]:
     return [
-        {"code": "free", "name": "Free", "monthly_price_cents": 0, "included_credits": 1_000},
+        {"code": "free", "name": "Free", "monthly_price_cents": 0, "included_credits": 10},
         # USD prices are clean round numbers roughly matching the EUR tiers
         # (~EUR * 1.10-1.12, then rounded to a tidy figure) - not a precise
         # FX conversion, since this product doesn't dynamically reprice by

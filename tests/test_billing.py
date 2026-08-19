@@ -121,13 +121,13 @@ def test_plan_change_refills_credits_to_the_new_plans_allotment(client, db_sessi
     org_id = _org_id_for(db_session, api_key)
     usage = UsageService()
 
-    # Spend some of the Free plan's starting 1,000 credits first, so a
+    # Spend some of the Free plan's starting 10 credits first, so a
     # refill is actually observable rather than trivially still the default.
     usage.charge(
         db_session, organization_id=org_id, api_key_id=None,
-        event_type=UsageEventType.CONTAINER_LOOKUP, credits=133,
+        event_type=UsageEventType.CONTAINER_LOOKUP, credits=3,
     )
-    assert usage.get_balance(db_session, org_id).credits_remaining == 867
+    assert usage.get_balance(db_session, org_id).credits_remaining == 7
 
     starter_price_id = "price_starter_test"
     db_session.query(Plan).filter_by(code="feeder").update({"stripe_price_id": starter_price_id})
@@ -523,9 +523,9 @@ def test_apply_credit_purchase_tops_up_the_balance_additively_not_a_reset(db_ses
     usage = UsageService()
 
     usage.charge(
-        db_session, organization_id=org_id, api_key_id=None, event_type=UsageEventType.CONTAINER_LOOKUP, credits=200
+        db_session, organization_id=org_id, api_key_id=None, event_type=UsageEventType.CONTAINER_LOOKUP, credits=2
     )
-    balance_before = usage.get_balance(db_session, org_id).credits_remaining  # Free plan: 1,000 - 200 = 800
+    balance_before = usage.get_balance(db_session, org_id).credits_remaining  # Free plan: 10 - 2 = 8
 
     BillingService().apply_credit_purchase(db_session, organization_id=org_id, credits=500)
 

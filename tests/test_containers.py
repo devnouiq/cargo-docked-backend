@@ -172,7 +172,7 @@ def test_bulk_rejects_items_it_cannot_charge_for(client, api_key, db_session, fa
     from app.repositories.usage import UsageRepository
 
     key_row = db_session.query(ApiKey).filter_by(key_hash=hash_token(api_key)).one()
-    UsageRepository().try_deduct_credits(db_session, key_row.organization_id, 1000)  # drain to zero
+    UsageRepository().try_deduct_credits(db_session, key_row.organization_id, 10)  # drain to zero
     db_session.commit()
 
     resp = client.post(
