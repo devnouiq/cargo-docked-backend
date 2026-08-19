@@ -56,9 +56,9 @@ def send_welcome_email(*, to_email: str, full_name: str | None) -> None:
     greeting_name = full_name or to_email
     html = f"""
     <div style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto;">
-      <h1 style="color: #111827; font-size: 20px;">Welcome to CargoTrack, {greeting_name}!</h1>
+      <h1 style="color: #111827; font-size: 20px;">Welcome to Cargo Docked, {greeting_name}!</h1>
       <p style="color: #374151; font-size: 14px; line-height: 1.6;">
-        Thanks for signing up. CargoTrack keeps your containers tracked and your team
+        Thanks for signing up. Cargo Docked keeps your containers tracked and your team
         notified the moment something changes - across every carrier and terminal, in
         one place.
       </p>
@@ -67,7 +67,7 @@ def send_welcome_email(*, to_email: str, full_name: str | None) -> None:
       </p>
     </div>
     """
-    _send(to_email=to_email, subject="Welcome to CargoTrack", html=html)
+    _send(to_email=to_email, subject="Welcome to Cargo Docked", html=html)
 
 
 def send_password_reset_email(*, to_email: str, reset_url: str, ttl_minutes: int) -> None:
@@ -75,7 +75,7 @@ def send_password_reset_email(*, to_email: str, reset_url: str, ttl_minutes: int
     <div style="font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto;">
       <h1 style="color: #111827; font-size: 20px;">Reset your password</h1>
       <p style="color: #374151; font-size: 14px; line-height: 1.6;">
-        We received a request to reset the password for your CargoTrack account.
+        We received a request to reset the password for your Cargo Docked account.
         Click the button below to choose a new one. This link expires in
         {ttl_minutes} minutes.
       </p>
@@ -93,7 +93,7 @@ def send_password_reset_email(*, to_email: str, reset_url: str, ttl_minutes: int
       </p>
     </div>
     """
-    _send(to_email=to_email, subject="Reset your CargoTrack password", html=html)
+    _send(to_email=to_email, subject="Reset your Cargo Docked password", html=html)
 
 
 def send_contact_notification(*, name: str, email: str, company: str | None, message: str) -> None:
