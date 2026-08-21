@@ -111,6 +111,20 @@ class _FakeProviderRegistry:
             raw_data={"fake": True},
         )
 
+    async def warm(self, count: int) -> None:
+        """No-op: main.py's app startup fires a real ProviderRegistry.warm()
+        in production to pre-establish live sessions - matching that call
+        shape here (rather than main.py skipping it) keeps `client`'s
+        TestClient lifespan startup from ever needing real network access."""
+        return
+
+    def configure_concurrency(self, max_concurrent: int) -> None:
+        """No-op: main.py's app startup also configures a real
+        ProviderRegistry's per-process connection budget - matching that
+        call shape here so it doesn't raise AttributeError against this
+        fake during `client`'s TestClient lifespan startup."""
+        return
+
 
 @pytest.fixture(autouse=True)
 def _fake_provider_registry(monkeypatch):

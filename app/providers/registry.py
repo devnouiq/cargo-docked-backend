@@ -150,8 +150,41 @@ class SearatesHttpProvider:
     # _ATTEMPT_TIMEOUT_S + _ATTEMPT_TIMEOUT_S.
     _HEDGE_DELAY_S = 6.0
 
+    # Fallback only - real processes call configure_concurrency() at startup
+    # (see main.py, workers/arq_app.py) before any traffic arrives. Kept
+    # modest so nothing goes unbounded if some caller forgets to configure
+    # it (e.g. a script that builds a registry directly).
+    _DEFAULT_MAX_CONCURRENT = 8
+
     def __init__(self) -> None:
         self._local = threading.local()
+        self._semaphore = asyncio.Semaphore(self._DEFAULT_MAX_CONCURRENT)
+
+    def configure_concurrency(self, max_concurrent: int) -> None:
+        """Caps how many live connections to Oxylabs THIS PROCESS will have
+        open at once - the actual fix for the concurrency-ceiling problem
+        (Oxylabs caps concurrent connections per account, shared across
+        every process talking to it).
+
+        Deliberately a per-process, statically-reserved budget, not a
+        cross-process/shared counter (e.g. via Redis): the API process and
+        the arq worker process each get their own fixed slice of the total
+        safe budget, configured once at startup by whichever process this
+        is (see main.py's lifespan, workers/arq_app.py's _on_startup). That
+        means a customer's single lookup is NEVER queued behind bulk
+        background scraping's connections - they're in different
+        processes, drawing from different budgets, not competing for the
+        same pool. A shared/coordinated limiter would need every process
+        to round-trip through Redis (or similar) before every single
+        connection just to stay in sync, adding real latency and a new
+        failure mode, to solve a problem a static split already solves for
+        free.
+
+        Applies to BOTH attempts of a hedged lookup - a hedge's backup
+        attempt still has to acquire a slot like anything else, so hedging
+        can never let one lookup silently exceed this process's budget.
+        """
+        self._semaphore = asyncio.Semaphore(max_concurrent)
 
     def supports(self, container_number: str) -> bool:
         return True
@@ -171,10 +204,20 @@ class SearatesHttpProvider:
             self._local.tracker = None
             raise
 
+    async def _run_attempt(self, container_number: str) -> dict:
+        # Held for the whole live call, not just at dispatch - this is what
+        # actually bounds concurrent Oxylabs connections, as opposed to
+        # max_jobs/thread-pool sizing, which bound concurrent jobs/threads
+        # but not concurrent network connections (a hedged lookup can open
+        # two connections per job, silently doubling real concurrency past
+        # either of those numbers).
+        async with self._semaphore:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._track_sync, container_number), timeout=self._ATTEMPT_TIMEOUT_S
+            )
+
     def _attempt(self, container_number: str) -> asyncio.Task:
-        return asyncio.ensure_future(
-            asyncio.wait_for(asyncio.to_thread(self._track_sync, container_number), timeout=self._ATTEMPT_TIMEOUT_S)
-        )
+        return asyncio.ensure_future(self._run_attempt(container_number))
 
     async def track(self, container_number: str) -> NormalizedTrackingResult:
         task_a = self._attempt(container_number)
@@ -206,6 +249,35 @@ class SearatesHttpProvider:
                         other.cancel()
                     return self._adapt(raw)
         return NormalizedTrackingResult(ok=False, error=last_error)
+
+    async def warm(self, count: int) -> None:
+        """Best-effort startup warm-up: proactively establish `count` worker
+        threads' sessions before real traffic arrives, so the first `count`
+        real requests each land on an already-warm thread instead of paying
+        the cold session/token setup cost individually. Fired from app/
+        worker startup (see main.py, workers/arq_app.py) as a background
+        task, not awaited there - this can take several seconds per thread
+        (a real network round-trip each) and must never delay the process
+        becoming ready to serve traffic.
+
+        Uses a placeholder container number - session/token establishment
+        doesn't depend on the number being real, only the final data-fetch
+        step does, and a `WRONG_NUMBER`-shaped miss on that placeholder is
+        exactly as good a warm-up as a real hit for this purpose.
+
+        Goes through the same concurrency semaphore as a real lookup
+        (configure_concurrency) - warming still means real connections to
+        Oxylabs, and this must never let a startup burst exceed this
+        process's reserved budget any more than real traffic can.
+        """
+        async def _warm_one() -> None:
+            try:
+                async with self._semaphore:
+                    await asyncio.to_thread(self._track_sync, "WARMUP0000001")
+            except Exception:  # noqa: BLE001 - a failed warm-up just means that thread cold-starts on its first real request, same as before this existed
+                pass
+
+        await asyncio.gather(*[_warm_one() for _ in range(count)])
 
     @staticmethod
     def _adapt(raw: dict) -> NormalizedTrackingResult:
@@ -378,6 +450,25 @@ class ProviderRegistry:
             ok=False,
             error="Container data is not yet available. Try again later or verify the container number is correct.",
         )
+
+    async def warm(self, count: int) -> None:
+        """Best-effort startup warm-up - delegates to any provider that
+        supports it (currently just SearatesHttpProvider; RomeuHttpProvider
+        builds a fresh tracker per call already, nothing to warm there)."""
+        for provider in self._providers:
+            warm_fn = getattr(provider, "warm", None)
+            if warm_fn is not None:
+                await warm_fn(count)
+
+    def configure_concurrency(self, max_concurrent: int) -> None:
+        """Caps this process's live-connection budget - delegates to any
+        provider that supports it (see SearatesHttpProvider.configure_concurrency
+        for why this is a per-process static reservation, not a shared/
+        cross-process limiter)."""
+        for provider in self._providers:
+            configure_fn = getattr(provider, "configure_concurrency", None)
+            if configure_fn is not None:
+                configure_fn(max_concurrent)
 
 
 _default_registry: ProviderRegistry | None = None

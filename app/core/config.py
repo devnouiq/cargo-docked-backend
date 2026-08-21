@@ -35,8 +35,17 @@ class Settings(BaseSettings):
     # Postgres in every real environment; tests override this to a SQLite
     # file/in-memory URL via env var so the suite needs no external service.
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/cargotrack"
-    database_pool_size: int = 10
-    database_pool_max_overflow: int = 10
+    # A scrape_container job (workers/tasks/scrape.py) holds its DB session
+    # open for the whole job, including the live provider HTTP call - not
+    # just its actual DB reads/writes - since container_service.py's
+    # _process_in_own_session wraps both in one `with SessionLocal() as db`.
+    # With the old pool_size=10/max_overflow=10 (20 total), a bulk batch
+    # concurrency of max_jobs=50 (workers/arq_app.py) meant jobs 21+ blocked
+    # waiting for a connection - confirmed live: a 50-job batch visibly
+    # clustered into waves ~30s apart (SQLAlchemy's default pool_timeout)
+    # instead of running together. Sized to comfortably cover max_jobs.
+    database_pool_size: int = 30
+    database_pool_max_overflow: int = 30
 
     # --- redis / background jobs (arq) -------------------------------------
     redis_url: str = "redis://localhost:6379/0"
