@@ -34,6 +34,37 @@ from ..repositories import ContainerResultRepository
 logger = logging.getLogger(__name__)
 _repository = ContainerResultRepository()
 
+# Bounds one attempt even if the tracker's own internal retry gets stuck
+# (SeaRatesTracker retries a failing session for up to max_wait_total_s=3h -
+# fine for a background job in isolation, not here, where every other queued
+# container behind it in this worker's share of the batch would wait too).
+# Matches SeaRatesTracker's own ~30s curl connect timeout (searates_http.py,
+# untouched) - comfortably covers even a slow-but-real response.
+_ATTEMPT_TIMEOUT_S = 30.0
+
+# Hedged, not "wait for a failure before trying anything else" - same
+# reasoning and same value as registry.py's SearatesHttpProvider (the
+# standardized /v1/containers path): if this worker's current attempt hasn't
+# answered within this long, fire a second, independent attempt on a brand
+# new tracker (fresh proxy connection) in parallel and use whichever answers
+# first. Set well above typical per-item latency so normal items never
+# trigger it - only the slow/stuck tail does. Whichever tracker actually
+# wins the race becomes this worker's tracker for the *next* queue item too
+# (see _worker) - if the hedge's fresh tracker won, that's a strictly better
+# tracker to keep than whatever the original was stuck on.
+_HEDGE_DELAY_S = 6.0
+
+
+def _new_tracker(worker_id: int, tracker_kwargs: dict[str, Any]) -> SeaRatesTracker:
+    return SeaRatesTracker(TrackerConfig(**tracker_kwargs, session_label=f"worker-{worker_id}"))
+
+
+async def _attempt(tracker: SeaRatesTracker, number: str, sealine: str) -> tuple[SeaRatesTracker, dict]:
+    result = await asyncio.wait_for(
+        asyncio.to_thread(track_with_cache, tracker, number, sealine), timeout=_ATTEMPT_TIMEOUT_S
+    )
+    return tracker, result
+
 
 def _summarize_for_cache(result: dict) -> tuple[str, Optional[str]]:
     status = result.get("shipment_status") or result.get("status") or "UNKNOWN"
@@ -79,7 +110,7 @@ async def _worker(
     sealine: str,
     tracker_kwargs: dict[str, Any],
 ) -> None:
-    tracker = SeaRatesTracker(TrackerConfig(**tracker_kwargs, session_label=f"worker-{worker_id}"))
+    tracker = _new_tracker(worker_id, tracker_kwargs)
     while True:
         try:
             index, number = queue.get_nowait()
@@ -87,9 +118,53 @@ async def _worker(
             return
 
         start = time.perf_counter()
-        try:
-            result = await asyncio.to_thread(track_with_cache, tracker, number, sealine)
-            duration = round(time.perf_counter() - start, 3)
+        task_a = asyncio.ensure_future(_attempt(tracker, number, sealine))
+        done, _ = await asyncio.wait({task_a}, timeout=_HEDGE_DELAY_S)
+
+        pending = {task_a}
+        if task_a not in done:
+            # This worker's current tracker hasn't answered within the hedge
+            # delay - race a second, independent attempt on a brand new
+            # tracker (fresh proxy connection) instead of waiting out
+            # whatever's wrong with the first one.
+            pending.add(asyncio.ensure_future(_attempt(_new_tracker(worker_id, tracker_kwargs), number, sealine)))
+
+        result = None
+        error_message = "unknown error"
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    winning_tracker, result = task.result()
+                except asyncio.TimeoutError:
+                    error_message = f"TIMED_OUT_AFTER_{int(_ATTEMPT_TIMEOUT_S)}S"
+                except RateLimited as exc:
+                    error_message = f"RATE_LIMITED_GAVE_UP: {exc}"
+                except Exception as exc:  # noqa: BLE001 - isolate one failure from the rest of the batch
+                    error_message = str(exc)
+                else:
+                    # First usable answer wins. Keep whichever tracker
+                    # actually produced it as this worker's tracker for the
+                    # *next* queue item - if the hedge's fresh tracker won,
+                    # that's a strictly better one to carry forward than
+                    # whatever the original was stuck on. The other attempt
+                    # (if any) is left to finish on its own thread; cancel
+                    # here just stops us waiting on it further.
+                    tracker = winning_tracker
+                    for other in pending:
+                        other.cancel()
+                    pending = set()
+                    break
+
+        if result is None:
+            # Every attempt failed (timeout/rate-limit/other) - don't keep
+            # using a tracker that just proved broken for this worker's
+            # remaining queue items. Same self-healing as registry.py's
+            # SearatesHttpProvider._track_sync.
+            tracker = _new_tracker(worker_id, tracker_kwargs)
+
+        duration = round(time.perf_counter() - start, 3)
+        if result is not None:
             result["duration_seconds"] = duration
             logger.info(
                 "[worker %d] %s -> %s (%s)%s in %ss%s",
@@ -97,17 +172,9 @@ async def _worker(
                 f" message={result['message']!r}" if result.get("status") == "error" and result.get("message") else "",
                 duration, " [db cache hit]" if result.get("_db_cache_hit") else "",
             )
-        except RateLimited as exc:
-            duration = round(time.perf_counter() - start, 3)
-            result = {
-                "number": number, "status": "error",
-                "message": f"RATE_LIMITED_GAVE_UP: {exc}", "duration_seconds": duration,
-            }
-            logger.warning("[worker %d] %s rate-limited after %ss", worker_id, number, duration)
-        except Exception as exc:  # noqa: BLE001 - isolate one failure from the rest of the batch
-            duration = round(time.perf_counter() - start, 3)
-            result = {"number": number, "status": "error", "message": str(exc), "duration_seconds": duration}
-            logger.error("[worker %d] %s failed after %ss: %s", worker_id, number, duration, exc)
+        else:
+            result = {"number": number, "status": "error", "message": error_message, "duration_seconds": duration}
+            logger.error("[worker %d] %s failed after %ss: %s", worker_id, number, duration, error_message)
 
         results[index] = result
 

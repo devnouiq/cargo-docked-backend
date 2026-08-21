@@ -24,6 +24,16 @@ async def scrape_container(ctx: dict, container_id: str) -> None:
     # provider stack (browser automation deps included) which the arq
     # worker process needs, but keeping it lazy avoids a needless import
     # cost for anything else that imports this module (e.g. tests).
+    #
+    # A fresh ContainerService() per job (not a module-level singleton) is
+    # deliberate - it's what lets tests monkeypatch a fresh fake provider
+    # registry per test (see conftest.py's `_fake_provider_registry`) and
+    # have it actually take effect here. The session-pooling benefit
+    # (registry.py's SearatesHttpProvider) still applies across jobs in a
+    # real worker process regardless - build_default_registry() itself
+    # caches and returns the same registry/provider instance every call, so
+    # a fresh ContainerService() here still gets the same warmed-up
+    # SeaRatesTracker pool as the last job, not an empty one.
     from ...services.container_service import ContainerService
 
     service = ContainerService()

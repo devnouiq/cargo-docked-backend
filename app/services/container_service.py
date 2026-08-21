@@ -89,17 +89,34 @@ class ContainerService:
         reference: str | None = None,
         carrier_scac: str | None = None,
     ) -> TrackedContainer:
+        """Start tracking a container (`POST /v1/containers`) - but if this
+        org is already tracking it, this is the same "search/track" action a
+        customer re-runs on a number they've already looked up, so it must
+        behave like a read, not a fresh scrape:
+
+          - already `queued`/`in_progress` (e.g. mid-bulk-import) -> a
+            worker already owns this scrape; return the row as-is. Charging
+            or scraping again here would double-bill and race the worker on
+            the same container row.
+          - already scraped within `container_cache_ttl_seconds` -> serve
+            what's stored, no charge, no live lookup (the caching
+            `get_or_refresh` already does for `GET` - this mirrors it here).
+          - otherwise (brand new, or stale) -> charge and do one live
+            lookup, as before.
+        """
+        container, created = self.containers.get_or_create(
+            db, organization_id=organization_id, container_number=container_number,
+            reference=reference, carrier_scac=carrier_scac,
+        )
+        if not created and not self._needs_live_lookup(container):
+            return container
+
         self.usage.charge(
             db,
             organization_id=organization_id,
             api_key_id=api_key_id,
             event_type=UsageEventType.CONTAINER_LOOKUP,
             container_number=container_number,
-        )
-
-        container, _created = self.containers.get_or_create(
-            db, organization_id=organization_id, container_number=container_number,
-            reference=reference, carrier_scac=carrier_scac,
         )
         await self._refresh_and_apply(db, container)
         db.commit()
@@ -122,19 +139,42 @@ class ContainerService:
                 "POST /v1/containers to start tracking it."
             )
 
-        if self._is_stale(container.last_polled_at):
-            self.usage.charge(
-                db,
-                organization_id=organization_id,
-                api_key_id=api_key_id,
-                event_type=UsageEventType.CONTAINER_LOOKUP,
-                container_number=container_number,
-            )
-            await self._refresh_and_apply(db, container)
-            db.commit()
-            db.refresh(container)
+        if not self._needs_live_lookup(container):
+            return container
+
+        self.usage.charge(
+            db,
+            organization_id=organization_id,
+            api_key_id=api_key_id,
+            event_type=UsageEventType.CONTAINER_LOOKUP,
+            container_number=container_number,
+        )
+        await self._refresh_and_apply(db, container)
+        db.commit()
+        db.refresh(container)
 
         return container
+
+    @staticmethod
+    def _is_pending(container: TrackedContainer) -> bool:
+        return container.tracking_status in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS)
+
+    @classmethod
+    def _needs_live_lookup(cls, container: TrackedContainer) -> bool:
+        """Whether a read/track call should trigger (and charge for) a live
+        provider lookup for this already-tracked container.
+
+        False while a scrape is already `queued`/`in_progress` - a
+        background worker (queue_bulk/request_refresh) already owns this
+        row's next result, so charging/scraping again here would double-bill
+        and race the worker writing to the same row. False again once that
+        settles and the row is fresh (`last_polled_at` within
+        `container_cache_ttl_seconds`) - only a genuinely stale row needs a
+        new live lookup.
+        """
+        if cls._is_pending(container):
+            return False
+        return cls._is_stale(container.last_polled_at)
 
     @staticmethod
     def _is_stale(last_polled_at: datetime | None) -> bool:
