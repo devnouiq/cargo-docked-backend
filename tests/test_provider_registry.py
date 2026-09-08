@@ -373,33 +373,54 @@ GOCOMET_RAW_DATA_NOT_FOUND = {
     ],
 }
 
+# Genuinely captured live (a real 50+10-container load test against
+# production found this, not a synthetic sample like the two fixtures
+# above) - container CBHU4350204, carrier COSCO. This is what surfaced the
+# `current_location` coordinate-pair bug below: GoComet's shape is
+# inconsistent between a resolved shipload's `current_location` (came back
+# as raw `[lat, lng]`, not a place name) and event-level `location` fields
+# (plain strings, e.g. "Jeddah, SA") - see `_location_text()`'s docstring.
 GOCOMET_RAW_RESOLVED = {
-    "id": "11111111-1111-1111-1111-111111111111",
-    "tracking_number": "MSKU1234567",
-    "status": "in_transit",
-    "ops_status": "active",
-    "carrier": {"code": "MAEU", "name": "Maersk"},
+    "id": "bf2fff87-bf2a-4f3c-9729-2b521eb4e063",
+    "tracking_number": "CBHU4350204",
+    "status": "completed",
+    "ops_status": "unknown",
+    "carrier": {"code": "COSU", "name": "COSCO"},
     "shiploads": [
         {
-            "container_number": "MSKU1234567",
-            "display_status": "In Transit",
-            "current_location": "Rotterdam",
-            "eta": "2026-10-01",
-            "ata": "",
+            "container_number": "CBHU4350204",
+            "display_status": "Completed",
+            "current_location": [21.48182, 39.14713],
+            "eta": "05/08/2026 00:00",
+            "ata": "05/08/2026 00:00",
             "events": {
                 "1.0": {
                     "event_type": "gate_in",
-                    "location": "Shanghai",
-                    "vessel_details": {"name": "MSC OSCAR", "voyage": "001W"},
-                    "actual_date": "2026-09-01T00:00:00Z",
-                    "planned_date": "2026-09-01T00:00:00Z",
+                    "location": "Qingdao, CN",
+                    "vessel_details": {},
+                    "actual_date": "16/05/2026 00:00",
+                    "planned_date": "16/05/2026 00:00",
                 },
                 "2.0": {
                     "event_type": "origin_departure",
-                    "location": "Shanghai",
-                    "vessel_details": {"name": "MSC OSCAR", "voyage": "001W"},
-                    "actual_date": "2026-09-03T00:00:00Z",
-                    "planned_date": "2026-09-03T00:00:00Z",
+                    "location": "Qingdao, CN",
+                    "vessel_details": {},
+                    "actual_date": "18/05/2026 00:00",
+                    "planned_date": "18/05/2026 00:00",
+                },
+                "4.0": {
+                    "event_type": "arrival",
+                    "location": "Jeddah, SA",
+                    "vessel_details": {},
+                    "actual_date": "05/08/2026 00:00",
+                    "planned_date": "05/08/2026 00:00",
+                },
+                "5.0": {
+                    "event_type": "gate_out",
+                    "location": "Jeddah, SA",
+                    "vessel_details": {},
+                    "actual_date": "11/08/2026 00:00",
+                    "planned_date": "11/08/2026 00:00",
                 },
             },
         }
@@ -435,9 +456,27 @@ def test_gocomet_adapt_pending_or_not_found_is_a_miss():
 def test_gocomet_adapt_resolved_status_is_a_hit_with_events():
     result = GoCometHttpProvider._adapt(GoCometTracker._parse(GOCOMET_RAW_RESOLVED))
     assert result.ok is True
-    assert result.status == "In Transit"
-    assert result.location == "Rotterdam"
-    assert result.vessel == "MSC OSCAR"
-    assert result.voyage == "001W"
-    assert len(result.events) == 2
-    assert result.provider_tracking_id == "11111111-1111-1111-1111-111111111111"
+    assert result.status == "Completed"
+    # result.location is GoComet's own top-level guess (here, a normalized
+    # coordinate pair - see the dedicated test below) - the repository layer
+    # (apply_provider_result, not this adapter) is what prefers the most
+    # recent *actual* event's location over this fallback; not re-tested here.
+    assert result.location == "21.48182, 39.14713"
+    assert len(result.events) == 4
+    assert result.events[-1].location == "Jeddah, SA"
+    assert result.provider_tracking_id == "bf2fff87-bf2a-4f3c-9729-2b521eb4e063"
+
+
+def test_gocomet_parse_normalizes_a_coordinate_pair_location_to_text():
+    """Regression test: GoComet's `current_location` came back live as a raw
+    `[lat, lng]` pair, not a place name - a bare list reaching
+    NormalizedTrackingResult.location (typed str | None) would break the
+    first consumer expecting a string. Must become readable text, not be
+    silently dropped or passed through as a list."""
+    parsed = GoCometTracker._parse(GOCOMET_RAW_RESOLVED)
+    assert parsed["current_location"] == "21.48182, 39.14713"
+
+    # And event-level `location` fields (plain strings, e.g. "Jeddah, SA")
+    # must pass through unchanged - the normalization only kicks in for the
+    # non-string shape actually observed.
+    assert [e["location"] for e in parsed["events"]] == ["Qingdao, CN", "Qingdao, CN", "Jeddah, SA", "Jeddah, SA"]

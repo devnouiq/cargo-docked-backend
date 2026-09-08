@@ -440,7 +440,7 @@ class GoCometTracker:
                 {
                     "order": key,
                     "event_type": e.get("event_type"),
-                    "location": e.get("location") or (e.get("port") or {}).get("name"),
+                    "location": _location_text(e.get("location")) or _location_text((e.get("port") or {}).get("name")),
                     "vessel": vessel_details.get("name"),
                     "voyage": vessel_details.get("voyage"),
                     "actual_date": e.get("actual_date") or None,
@@ -457,12 +457,36 @@ class GoCometTracker:
             "invalid_reason": raw.get("invalid_or_yet_to_start_reason"),
             "carrier_code": carrier.get("code"),
             "carrier_name": carrier.get("name"),
-            "current_location": primary.get("current_location"),
+            "current_location": _location_text(primary.get("current_location")),
             "eta": primary.get("eta") or None,
             "ata": primary.get("ata") or None,
             "events": events,
             "provider": "gocomet",
         }
+
+
+def _location_text(value: object) -> Optional[str]:
+    """Normalize a GoComet "location" field to a display string or None.
+
+    Confirmed live: GoComet's shape is inconsistent here - a resolved
+    shipload's `current_location` came back as a raw `[lat, lng]` pair
+    (coordinates, not a place name), while event-level `location` fields
+    observed so far are plain strings ("Jeddah, SA"). A raw list/tuple
+    reaching `NormalizedTrackingResult.location` (typed `str | None`) would
+    silently break the first consumer that assumes a string (e.g. a Pydantic
+    response schema). Coordinates are still useful, so format them as text
+    rather than dropping them - only genuinely unrecognized shapes become
+    None.
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(v, (int, float)) for v in value)
+    ):
+        return f"{value[0]:.5f}, {value[1]:.5f}"
+    return None
 
 
 def _is_floatish(value: str) -> bool:
