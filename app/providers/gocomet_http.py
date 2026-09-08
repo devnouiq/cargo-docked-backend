@@ -496,12 +496,26 @@ class GoCometTracker:
                 }
             )
 
+        status = raw.get("status")
+        ops_status = raw.get("ops_status")
         return {
             "tracking_id": raw.get("id"),
-            "status": raw.get("status"),
-            "ops_status": raw.get("ops_status"),
+            # SeaRates-shape compatibility field name (the debug routes'
+            # only consumer right now, cargo-docked-next's tracking page,
+            # reads `.number`) - GoComet's own field is `tracking_number`.
+            "number": raw.get("tracking_number"),
+            "status": status,
+            "ops_status": ops_status,
             "display_status": primary.get("display_status"),
             "invalid_reason": raw.get("invalid_or_yet_to_start_reason"),
+            # Single source of truth for "did this resolve to real data" -
+            # both registry.py's adapter (ok/error) and the debug routes'
+            # raw JSON response (frontend reads this directly) key off this
+            # one computed field, instead of each independently re-deriving
+            # it from `status`/`ops_status` string matching and risking the
+            # two drifting apart on a status this module doesn't know about
+            # yet.
+            "found": _is_found(status, ops_status),
             "carrier_code": carrier.get("code"),
             "carrier_name": carrier.get("name"),
             "current_location": _location_text(primary.get("current_location")),
@@ -510,6 +524,24 @@ class GoCometTracker:
             "events": events,
             "provider": "gocomet",
         }
+
+
+# Terminal statuses meaning "GoComet has a final answer, and it isn't real
+# tracking data" - "pending" is non-terminal (still resolving). Confirmed
+# live: "data_not_found" (carrier had nothing), "invalid_tracking" (bad
+# ISO 6346 check digit, rejected before any tracking record was even
+# created - ops_status "marked_invalid" in both cases). "invalid" is kept
+# too as a plausible sibling value never actually observed.
+_MISS_STATUSES = frozenset({"pending", "data_not_found", "invalid", "invalid_tracking"})
+
+
+def _is_found(status: Optional[str], ops_status: Optional[str]) -> bool:
+    status = (status or "").lower()
+    if not status or status in _MISS_STATUSES:
+        return False
+    if (ops_status or "").lower() == "marked_invalid":
+        return False
+    return True
 
 
 def _location_text(value: object) -> Optional[str]:

@@ -464,6 +464,7 @@ def test_gocomet_track_handles_a_rejected_number_with_no_id():
     assert result["status"] == "invalid_tracking"
     assert result["tracking_id"] is None
     assert result["invalid_reason"] == "Your entered container number check digit is invalid"
+    assert result["found"] is False  # the frontend's single source of truth
     assert created_ids == []  # on_created never fires - no id was ever created
 
     adapted = GoCometHttpProvider._adapt(result)
@@ -475,6 +476,8 @@ def test_gocomet_parse_pending_has_no_events():
     parsed = GoCometTracker._parse(GOCOMET_RAW_PENDING)
     assert parsed["status"] == "pending"
     assert parsed["tracking_id"] == "c075b480-1c05-46db-8588-8ef1c34e172b"
+    assert parsed["number"] == "GTIU2401747"
+    assert parsed["found"] is False  # still pending - not resolved yet either way
     assert parsed["events"] == []
     assert parsed["provider"] == "gocomet"
 
@@ -483,7 +486,14 @@ def test_gocomet_parse_data_not_found_flattens_events_in_order():
     parsed = GoCometTracker._parse(GOCOMET_RAW_DATA_NOT_FOUND)
     assert parsed["status"] == "data_not_found"
     assert parsed["invalid_reason"] == "Data not found on selected carrier"
+    assert parsed["found"] is False
     assert [e["event_type"] for e in parsed["events"]] == ["gate_in", "origin_departure"]
+
+
+def test_gocomet_parse_resolved_sets_found_true():
+    parsed = GoCometTracker._parse(GOCOMET_RAW_RESOLVED)
+    assert parsed["found"] is True
+    assert parsed["number"] == "CBHU4350204"
 
 
 def test_gocomet_adapt_pending_or_not_found_is_a_miss():

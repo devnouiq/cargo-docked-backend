@@ -52,11 +52,6 @@ _FAILURE_STATUS_MARKERS = (
     "failed", "fetcher error", "error:", "blocked", "no carrier", "invalid", "no tracking",
 )
 
-# GoComet top-level `status` values observed/expected to mean "resolved, but
-# the carrier had nothing for this number" - see gocomet_http.py's module
-# docstring for what was actually captured live.
-_GOCOMET_NOT_FOUND_STATUSES = frozenset({"data_not_found", "invalid"})
-
 
 def _looks_like_failure(status: str | None) -> bool:
     if not status:
@@ -415,13 +410,14 @@ class GoCometHttpProvider:
         # `parsed` is already GoCometTracker.track()'s flattened output
         # (that method returns `_parse()`'s shape directly, matching
         # SeaRatesTracker.track()'s convention) - no further parsing here.
-        status = (parsed.get("status") or "").lower()
-        ops_status = (parsed.get("ops_status") or "").lower()
-
-        if status == "pending" or status in _GOCOMET_NOT_FOUND_STATUSES or ops_status == "marked_invalid":
+        # `found` is computed once, in gocomet_http.py's _parse() - single
+        # source of truth shared with the debug routes' raw JSON response,
+        # rather than this adapter re-deriving it from status/ops_status
+        # independently and risking the two drifting apart.
+        if not parsed.get("found"):
             return NormalizedTrackingResult(
                 ok=False,
-                error=parsed.get("invalid_reason") or parsed.get("display_status") or status or "no data returned",
+                error=parsed.get("invalid_reason") or parsed.get("display_status") or parsed.get("status") or "no data returned",
                 raw_data=parsed,
                 provider_tracking_id=parsed.get("tracking_id"),
             )
@@ -440,7 +436,7 @@ class GoCometHttpProvider:
         ]
         return NormalizedTrackingResult(
             ok=True,
-            status=parsed.get("display_status") or status,
+            status=parsed.get("display_status") or parsed.get("status"),
             location=parsed.get("current_location"),
             vessel=next((e.vessel for e in reversed(events) if e.vessel), None),
             voyage=next((e.voyage for e in reversed(events) if e.voyage), None),

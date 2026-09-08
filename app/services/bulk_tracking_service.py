@@ -204,12 +204,15 @@ async def track_many_parallel(
     await asyncio.gather(*workers)
     total_duration = round(time.perf_counter() - start, 3)
 
-    # GoComet's top-level `status` has no single fixed "success" literal the
-    # way SeaRates' did - anything that isn't an explicit error/not-found/
-    # still-pending outcome counts as resolved.
+    # `found` is GoCometTracker._parse()'s single source of truth for "did
+    # this resolve to real data" - shared with registry.py's adapter so this
+    # count can't drift out of sync with what the standardized /v1/containers
+    # path considers a hit. `status == "error"` is this module's own
+    # synthetic marker (_worker's exception-handling branch, not anything
+    # GoComet ever returns) for an attempt that raised instead of completing.
     success_count = sum(
         1 for r in results
-        if r and r.get("status") not in ("error", "pending", "data_not_found", "invalid")
+        if r and r.get("status") != "error" and r.get("found")
     )
     error_count = len(numbers) - success_count
     throughput = round(len(numbers) / total_duration, 2) if total_duration > 0 else 0.0
