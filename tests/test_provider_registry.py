@@ -520,6 +520,30 @@ def test_gocomet_adapt_resolved_status_is_a_hit_with_events():
     assert result.provider_tracking_id == "bf2fff87-bf2a-4f3c-9729-2b521eb4e063"
 
 
+def test_gocomet_events_parse_ddmmyyyy_dates_and_sort_chronologically():
+    """Regression test for a real bug found live: GoComet's date format
+    (`%d/%m/%Y %H:%M`, e.g. "16/05/2026 00:00") never matched
+    _parse_date()'s original SeaRates-shaped formats, so every GoComet
+    event's occurred_at came back None - repositories/containers.py's
+    _most_recent_actual_value then had nothing real to compare and
+    `max()` silently returned the FIRST event (gate_in / origin) instead
+    of the true most recent one (gate_out / destination). Confirmed live
+    in the deployed app: a resolved container's location showed "Qingdao,
+    CN" (origin) instead of "Jeddah, SA" (the actual latest event)."""
+    result = GoCometHttpProvider._adapt(GoCometTracker._parse(GOCOMET_RAW_RESOLVED))
+    dates = [e.occurred_at for e in result.events]
+    assert all(d is not None for d in dates), "GoComet event dates must parse, not silently become None"
+    assert dates == sorted(dates), "events must already be in chronological order"
+    # The actual regression: the most recent *actual* event by real
+    # timestamp must be gate_out/Jeddah, not gate_in/Qingdao (event order
+    # in the raw payload already happens to be chronological, so this also
+    # guards against a future fixture/ordering change silently masking the
+    # underlying date-parsing bug from resurfacing).
+    latest = max(result.events, key=lambda e: e.occurred_at)
+    assert latest.location == "Jeddah, SA"
+    assert latest.event_code == "gate_out"
+
+
 def test_gocomet_parse_normalizes_a_coordinate_pair_location_to_text():
     """Regression test: GoComet's `current_location` came back live as a raw
     `[lat, lng]` pair, not a place name - a bare list reaching

@@ -61,9 +61,21 @@ def _looks_like_failure(status: str | None) -> bool:
 
 
 def _parse_date(value: object) -> datetime | None:
+    """Shared across SeaRates/Romeu/GoComet event dates (registry.py:307,
+    432, 480) - each upstream uses its own format, tried in order below.
+
+    Bug found live: GoComet's `%d/%m/%Y %H:%M` ("16/05/2026 00:00") never
+    matched any of the original (SeaRates-shaped) formats, so every GoComet
+    event's `occurred_at` silently came back None - `_most_recent_actual_value`
+    (repositories/containers.py) then had no real dates to compare, and
+    `max()` on all-equal/None keys returns the *first* candidate, not the
+    true most recent one. Confirmed live: a resolved container's
+    `last_known_location` showed the ORIGIN (gate_in) instead of the actual
+    latest event (gate_out) - wrong data, not just a missing nicety.
+    """
     if not value or not isinstance(value, str):
         return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M", "%d/%m/%Y"):
         try:
             return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
         except ValueError:
