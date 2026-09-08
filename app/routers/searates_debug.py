@@ -18,7 +18,8 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from ..config import settings
-from ..providers.gocomet_http import CarrierNotResolved, RateLimited, GoCometTracker, TrackerConfig
+from ..providers.gocomet_http import CarrierNotResolved, RateLimited
+from ..providers.gocomet_pool import get_pool
 from ..providers.searates_browser import scrape_searates
 from ..schemas import BulkTrackRequest
 from ..services.bulk_tracking_service import track_many_parallel, track_with_cache
@@ -57,23 +58,32 @@ async def track_searates(number: str, sealine: str = "AUTO"):
     bulk_tracking_service.py's module docstring for why this parameter name
     stays as `sealine` despite no longer meaning SeaRates' sealine/SCAC code.
     """
-    tracker = GoCometTracker(TrackerConfig(**_tracker_proxy_kwargs()))
+    pool = get_pool(_tracker_proxy_kwargs())
+    tracker = pool.acquire()
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(track_with_cache, tracker, number, sealine), timeout=_SINGLE_LOOKUP_TIMEOUT_S
         )
     except RateLimited as e:
+        pool.discard(tracker)  # exit IP is burned - don't hand it to the next caller
         raise HTTPException(status_code=429, detail=f"GoComet rate limited: {e}")
     except CarrierNotResolved as e:
         # A legitimate "we don't know the carrier" outcome, not a server
-        # error - see CarrierNotResolved's docstring. Client should retry
-        # with an explicit ?sealine=<CARRIER_CODE>.
+        # error or a burned session - see CarrierNotResolved's docstring.
+        # Client should retry with an explicit ?sealine=<CARRIER_CODE>.
+        pool.release(tracker)
         raise HTTPException(status_code=422, detail=str(e))
     except asyncio.TimeoutError:
+        pool.discard(tracker)  # don't trust a tracker that just took >120s
         raise HTTPException(
             status_code=503,
             detail=f"GoComet did not resolve {number!r} within {_SINGLE_LOOKUP_TIMEOUT_S:.0f}s - try again shortly.",
         )
+    except Exception:
+        pool.discard(tracker)  # unknown failure - safer to assume the session/connection is bad
+        raise
+    else:
+        pool.release(tracker)
     return result
 
 

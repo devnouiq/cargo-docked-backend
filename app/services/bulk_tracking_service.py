@@ -38,7 +38,8 @@ from typing import Any, Optional
 
 from ..config import settings
 from ..database import SessionLocal
-from ..providers.gocomet_http import GoCometTracker, RateLimited, TrackerConfig
+from ..providers.gocomet_http import GoCometTracker, RateLimited
+from ..providers.gocomet_pool import GoCometSessionPool, get_pool
 from ..repositories import ContainerResultRepository
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,6 @@ _ATTEMPT_TIMEOUT_S = 95.0
 # resolution time is dominated by its own server-side carrier scrape, not by
 # our connection - see registry.py's GoCometHttpProvider docstring for the
 # same reasoning on the standardized /v1/containers path.
-
-
-def _new_tracker(worker_id: int, tracker_kwargs: dict[str, Any]) -> GoCometTracker:
-    return GoCometTracker(TrackerConfig(**tracker_kwargs, session_label=f"worker-{worker_id}"))
 
 
 async def _attempt(tracker: GoCometTracker, number: str, sealine: str) -> tuple[GoCometTracker, dict]:
@@ -111,48 +108,63 @@ async def _worker(
     queue: "asyncio.Queue[tuple[int, str]]",
     results: list[Optional[dict]],
     sealine: str,
-    tracker_kwargs: dict[str, Any],
+    pool: GoCometSessionPool,
 ) -> None:
-    tracker = _new_tracker(worker_id, tracker_kwargs)
-    while True:
-        try:
-            index, number = queue.get_nowait()
-        except asyncio.QueueEmpty:
-            return
+    # Pulled from the pool, not built cold - the whole point of pre-warming
+    # is that `batch_size` workers starting at once don't all cold-start a
+    # proxy connection simultaneously (observed live: real connection
+    # strain under exactly this pattern before pooling existed).
+    tracker = pool.acquire()
+    try:
+        while True:
+            try:
+                index, number = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
-        start = time.perf_counter()
-        result = None
-        error_message = "unknown error"
-        try:
-            _, result = await _attempt(tracker, number, sealine)
-        except asyncio.TimeoutError:
-            error_message = f"TIMED_OUT_AFTER_{int(_ATTEMPT_TIMEOUT_S)}S"
-        except RateLimited as exc:
-            error_message = f"RATE_LIMITED_GAVE_UP: {exc}"
-        except Exception as exc:  # noqa: BLE001 - isolate one failure from the rest of the batch
-            error_message = str(exc)
+            start = time.perf_counter()
+            result = None
+            error_message = "unknown error"
+            try:
+                _, result = await _attempt(tracker, number, sealine)
+            except asyncio.TimeoutError:
+                error_message = f"TIMED_OUT_AFTER_{int(_ATTEMPT_TIMEOUT_S)}S"
+            except RateLimited as exc:
+                error_message = f"RATE_LIMITED_GAVE_UP: {exc}"
+            except Exception as exc:  # noqa: BLE001 - isolate one failure from the rest of the batch
+                error_message = str(exc)
 
-        if result is None:
-            # Attempt failed (timeout/rate-limit/other) - don't keep using a
-            # tracker that just proved broken for this worker's remaining
-            # queue items. Same self-healing as registry.py's
-            # GoCometHttpProvider._track_sync.
-            tracker = _new_tracker(worker_id, tracker_kwargs)
+            if result is None:
+                # Attempt failed (timeout/rate-limit/other) - don't keep
+                # using a tracker that just proved broken for this worker's
+                # remaining queue items. discard() triggers a background
+                # rebuild and hands back whatever's already warmed instead
+                # of cold-building inline (same self-healing intent as
+                # registry.py's GoCometHttpProvider._track_sync, now via
+                # the pool).
+                pool.discard(tracker)
+                tracker = pool.acquire()
 
-        duration = round(time.perf_counter() - start, 3)
-        if result is not None:
-            result["duration_seconds"] = duration
-            logger.info(
-                "[worker %d] %s -> %s%s in %ss%s",
-                worker_id, number, result.get("status"),
-                f" message={result['message']!r}" if result.get("status") == "error" and result.get("message") else "",
-                duration, " [db cache hit]" if result.get("_db_cache_hit") else "",
-            )
-        else:
-            result = {"number": number, "status": "error", "message": error_message, "duration_seconds": duration}
-            logger.error("[worker %d] %s failed after %ss: %s", worker_id, number, duration, error_message)
+            duration = round(time.perf_counter() - start, 3)
+            if result is not None:
+                result["duration_seconds"] = duration
+                logger.info(
+                    "[worker %d] %s -> %s%s in %ss%s",
+                    worker_id, number, result.get("status"),
+                    f" message={result['message']!r}" if result.get("status") == "error" and result.get("message") else "",
+                    duration, " [db cache hit]" if result.get("_db_cache_hit") else "",
+                )
+            else:
+                result = {"number": number, "status": "error", "message": error_message, "duration_seconds": duration}
+                logger.error("[worker %d] %s failed after %ss: %s", worker_id, number, duration, error_message)
 
-        results[index] = result
+            results[index] = result
+    finally:
+        # Whether this worker's queue share ran out normally, or the task
+        # was cancelled, hand the (still-good) tracker back for the *next*
+        # request to reuse - the pool is a long-lived singleton shared
+        # across every call to this route, not scoped to one batch.
+        pool.release(tracker)
 
 
 async def track_many_parallel(
@@ -178,14 +190,15 @@ async def track_many_parallel(
 
     results: list[Optional[dict]] = [None] * len(numbers)
     worker_count = max(1, min(batch_size, len(numbers)))
+    pool = get_pool(tracker_kwargs)
 
     logger.info(
-        "bulk track starting: %d containers, batch_size=%d (%d workers)",
-        len(numbers), batch_size, worker_count,
+        "bulk track starting: %d containers, batch_size=%d (%d workers, %d spares ready)",
+        len(numbers), batch_size, worker_count, pool.pending_spares(),
     )
     start = time.perf_counter()
     workers = [
-        asyncio.create_task(_worker(i, queue, results, sealine, tracker_kwargs))
+        asyncio.create_task(_worker(i, queue, results, sealine, pool))
         for i in range(worker_count)
     ]
     await asyncio.gather(*workers)
