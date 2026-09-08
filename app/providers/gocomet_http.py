@@ -311,6 +311,14 @@ class GoCometTracker:
         number = number.strip().upper()
         waited = 0.0
         rotations = 0
+        t_start = time.monotonic()
+        # Step 1 (create_tracking's POST) and step 2 (poll's GET loop) timed
+        # separately - surfaced in the returned dict as create_call_s/
+        # poll_call_s/total_call_s (see _finalize) so callers/ops can see
+        # where time actually goes, not just a single opaque total. Only the
+        # LAST successful create/poll attempt's own duration is recorded (a
+        # rate-limit retry's failed attempt doesn't count as real "cost" of
+        # the call that actually succeeded).
 
         def _rotations_exhausted() -> bool:
             # Primary bound for a synchronous single lookup: a fixed number
@@ -320,18 +328,25 @@ class GoCometTracker:
             # for a request-response call on its own).
             return rotations >= self.config.max_rotations or waited >= self.config.max_wait_total_s
 
+        def _finalize_timed(raw: dict, tracking_id: str, *, create_call_s: Optional[float], poll_call_s: Optional[float]) -> dict:
+            return self._finalize(
+                raw, tracking_id,
+                create_call_s=create_call_s, poll_call_s=poll_call_s, total_call_s=time.monotonic() - t_start,
+            )
+
         if resume_id:
             try:
                 logger.debug("[%s] resuming %s via existing tracking_id=%s", self._label, number, resume_id)
+                poll_t0 = time.monotonic()
                 raw = self.poll(resume_id)
-                return self._finalize(raw, resume_id)
+                return _finalize_timed(raw, resume_id, create_call_s=None, poll_call_s=time.monotonic() - poll_t0)
             except TrackingNotFound:
                 logger.info("[%s] resume_id=%s expired/not found, falling back to fresh create", self._label, resume_id)
             except TimeoutError:
                 # Still pending under the resumed poll budget - not an
                 # error, just not resolved yet. Same tracking_id stays
                 # valid for the next attempt (already persisted).
-                return self._finalize({"status": "pending"}, resume_id)
+                return _finalize_timed({"status": "pending"}, resume_id, create_call_s=None, poll_call_s=self.config.poll_timeout_s)
             except RateLimited:
                 # A limited resume attempt still burned this exit IP -
                 # rotate before falling through to a fresh create below.
@@ -341,6 +356,7 @@ class GoCometTracker:
                 self._rotate_session(reason=f"rate limit resuming {number}")
 
         new_id: Optional[str] = None
+        create_call_s: Optional[float] = None
         while True:
             if new_id is None:
                 # No id yet (first attempt, or a previous one expired) -
@@ -349,6 +365,7 @@ class GoCometTracker:
                 # back here - abandoning a paid-for id for a brand new one
                 # on every poll-time rate limit would waste GoComet's
                 # monthly quota far faster than necessary.
+                create_t0 = time.monotonic()
                 try:
                     created = self.create_tracking(number, carrier_code, mode)
                 except RateLimited:
@@ -373,6 +390,7 @@ class GoCometTracker:
                     time.sleep(nap)
                     waited += nap
                     continue
+                create_call_s = time.monotonic() - create_t0
 
                 new_id = created.get("id")
                 if not new_id:
@@ -382,11 +400,15 @@ class GoCometTracker:
 
                 status = created.get("status")
                 if status and status != "pending":
-                    return self._finalize(created, new_id)
+                    # Already resolved on the create response itself (a
+                    # previously-seen number, GoComet-side cache hit) -
+                    # no poll phase at all.
+                    return _finalize_timed(created, new_id, create_call_s=create_call_s, poll_call_s=0.0)
 
+            poll_t0 = time.monotonic()
             try:
                 raw = self.poll(new_id)
-                return self._finalize(raw, new_id)
+                return _finalize_timed(raw, new_id, create_call_s=create_call_s, poll_call_s=time.monotonic() - poll_t0)
             except RateLimited:
                 if _rotations_exhausted():
                     raise
@@ -409,14 +431,32 @@ class GoCometTracker:
                 # Not resolved within this attempt's poll budget - not a
                 # failure, the id is already persisted (on_created fired
                 # above) so a later refresh resumes it for free.
-                return self._finalize({"status": "pending"}, new_id)
+                return _finalize_timed(
+                    {"status": "pending"}, new_id, create_call_s=create_call_s, poll_call_s=time.monotonic() - poll_t0
+                )
 
     # --- response parsing -------------------------------------------------
     @classmethod
-    def _finalize(cls, raw: dict, tracking_id: str) -> dict:
+    def _finalize(
+        cls,
+        raw: dict,
+        tracking_id: str,
+        *,
+        create_call_s: Optional[float] = None,
+        poll_call_s: Optional[float] = None,
+        total_call_s: Optional[float] = None,
+    ) -> dict:
         raw = dict(raw)
         raw.setdefault("id", tracking_id)
-        return cls._parse(raw)
+        parsed = cls._parse(raw)
+        # Step 1 (POST create) / step 2 (poll GET loop) timing, surfaced for
+        # ops visibility - see track()'s docstring comment for what these
+        # do and don't measure (only the last successful attempt of each,
+        # not time spent on failed/rate-limited retries).
+        parsed["create_call_s"] = round(create_call_s, 3) if create_call_s is not None else None
+        parsed["poll_call_s"] = round(poll_call_s, 3) if poll_call_s is not None else None
+        parsed["total_call_s"] = round(total_call_s, 3) if total_call_s is not None else None
+        return parsed
 
     @staticmethod
     def _parse(raw: dict) -> dict:
