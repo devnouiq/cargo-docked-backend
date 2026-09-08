@@ -43,6 +43,12 @@ class NormalizedTrackingResult:
     raw_data: dict = field(default_factory=dict)
     error: str | None = None
     provider_name: str | None = None  # set by ProviderRegistry on success
+    # Upstream provider's own tracking-request id (currently only GoComet -
+    # its create-then-poll flow issues one per tracking request). None for
+    # providers with no such concept (SeaRates, Romeu). Persisted by
+    # ContainerService onto TrackedContainer.provider_tracking_id so a later
+    # refresh can resume polling instead of paying for a fresh create.
+    provider_tracking_id: str | None = None
 
 
 class TrackingProvider(Protocol):
@@ -54,4 +60,19 @@ class TrackingProvider(Protocol):
         such restriction return True unconditionally."""
         ...
 
-    async def track(self, container_number: str) -> NormalizedTrackingResult: ...
+    async def track(
+        self,
+        container_number: str,
+        *,
+        resume_id: str | None = None,
+        on_created: object | None = None,
+    ) -> NormalizedTrackingResult:
+        """`resume_id`: a previously-persisted `provider_tracking_id` this
+        provider issued for this container, if any - providers with no
+        create-then-poll concept (SeaRates, Romeu) just ignore it.
+        `on_created`: optional `Callable[[str], None]`, invoked synchronously
+        the instant a *new* provider-side tracking id is obtained (before any
+        polling), so the caller can persist it right away. Typed as `object`
+        here (not `Callable`) to keep this Protocol import-light; concrete
+        providers annotate it precisely."""
+        ...

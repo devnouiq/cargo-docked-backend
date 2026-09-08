@@ -42,7 +42,7 @@ steps:
       - '--region=us-central1'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--add-cloudsql-instances=$PROJECT_ID:us-central1:cargotrack-db'
+      - '--add-cloudsql-instances=$PROJECT_ID:us-central1:cargotrack-db-v2'
       - '--network=default'
       - '--vpc-egress=private-ranges-only'
       - >-
@@ -66,7 +66,7 @@ steps:
       - '--command=arq'
       - '--args=app.workers.arq_app.WorkerSettings'
       - '--instances=1'
-      - '--add-cloudsql-instances=$PROJECT_ID:us-central1:cargotrack-db'
+      - '--add-cloudsql-instances=$PROJECT_ID:us-central1:cargotrack-db-v2'
       - '--network=default'
       - '--vpc-egress=private-ranges-only'
       - '--set-env-vars=ENV=production,LOG_LEVEL=INFO,OXYLABS_PROXY_HOST=pr.oxylabs.io:7777,OXYLABS_PROXY_USERNAME=customer-DataDocked2026_KmjsA'

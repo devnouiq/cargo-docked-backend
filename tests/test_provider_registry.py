@@ -9,7 +9,8 @@ from __future__ import annotations
 import pytest
 
 from app.providers.base import NormalizedTrackingResult
-from app.providers.registry import ProviderRegistry, RomeuHttpProvider, SearatesHttpProvider
+from app.providers.gocomet_http import GoCometTracker
+from app.providers.registry import GoCometHttpProvider, ProviderRegistry, RomeuHttpProvider, SearatesHttpProvider
 from app.providers.searates_http import SeaRatesTracker
 
 # --- SeaRatesTracker._parse: vessel/location reference-ID resolution ------------
@@ -239,12 +240,16 @@ class _FakeProvider:
         self._result = result
         self._raises = raises
         self.calls: list[str] = []
+        self.resume_ids: list[str | None] = []
 
     def supports(self, container_number: str) -> bool:
         return self._supports_fn(container_number)
 
-    async def track(self, container_number: str) -> NormalizedTrackingResult:
+    async def track(
+        self, container_number: str, *, resume_id: str | None = None, on_created=None
+    ) -> NormalizedTrackingResult:
         self.calls.append(container_number)
+        self.resume_ids.append(resume_id)
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -304,3 +309,135 @@ async def test_registry_isolates_a_provider_that_raises():
 
     assert result.ok is True
     assert result.provider_name == "healthy"
+
+
+@pytest.mark.asyncio
+async def test_registry_forwards_resume_id_to_the_provider_that_handles_the_number():
+    """A previously-persisted provider_tracking_id must reach whichever
+    provider ends up trying this number, so it can resume a poll instead of
+    creating fresh (see GoCometHttpProvider/GoCometTracker)."""
+    provider = _FakeProvider("gocomet-ish", result=NormalizedTrackingResult(ok=True, status="found"))
+
+    await ProviderRegistry([provider]).track("MSKU1234567", resume_id="abc-123")
+
+    assert provider.resume_ids == ["abc-123"]
+
+
+# --- GoCometTracker._parse: real captured response shapes -----------------
+#
+# Both fixtures below were captured live against GoComet's public API
+# (poc_gocomet_tracking.py) during development - see gocomet_http.py's
+# module docstring for what wasn't captured (a genuinely resolved-with-data
+# success case; the numbers tested were synthetic/sample data with no real
+# carrier history, so only "pending" and "data_not_found" were observed).
+
+GOCOMET_RAW_PENDING = {
+    "id": "c075b480-1c05-46db-8588-8ef1c34e172b",
+    "tracking_number": "GTIU2401747",
+    "status": "pending",
+    "carrier": {"code": "MSCU", "name": "MSC"},
+    "shiploads": [],
+}
+
+GOCOMET_RAW_DATA_NOT_FOUND = {
+    "id": "fe62bba9-e82e-4753-83b5-9e1156bb9585",
+    "tracking_number": "GTIU0312445",
+    "status": "data_not_found",
+    "ops_status": "marked_invalid",
+    "invalid_or_yet_to_start_reason": "Data not found on selected carrier",
+    "carrier": {"code": "MSCU", "name": "MSC"},
+    "shiploads": [
+        {
+            "container_number": "GTIU0312445",
+            "display_status": "Data Not Found",
+            "current_location": None,
+            "eta": "",
+            "ata": "",
+            "events": {
+                "1.0": {
+                    "event_type": "gate_in",
+                    "location": None,
+                    "vessel_details": {},
+                    "actual_date": "",
+                    "planned_date": "awaiting_to_update",
+                },
+                "2.0": {
+                    "event_type": "origin_departure",
+                    "location": None,
+                    "vessel_details": {},
+                    "actual_date": "",
+                    "planned_date": "awaiting_to_update",
+                },
+            },
+        }
+    ],
+}
+
+GOCOMET_RAW_RESOLVED = {
+    "id": "11111111-1111-1111-1111-111111111111",
+    "tracking_number": "MSKU1234567",
+    "status": "in_transit",
+    "ops_status": "active",
+    "carrier": {"code": "MAEU", "name": "Maersk"},
+    "shiploads": [
+        {
+            "container_number": "MSKU1234567",
+            "display_status": "In Transit",
+            "current_location": "Rotterdam",
+            "eta": "2026-10-01",
+            "ata": "",
+            "events": {
+                "1.0": {
+                    "event_type": "gate_in",
+                    "location": "Shanghai",
+                    "vessel_details": {"name": "MSC OSCAR", "voyage": "001W"},
+                    "actual_date": "2026-09-01T00:00:00Z",
+                    "planned_date": "2026-09-01T00:00:00Z",
+                },
+                "2.0": {
+                    "event_type": "origin_departure",
+                    "location": "Shanghai",
+                    "vessel_details": {"name": "MSC OSCAR", "voyage": "001W"},
+                    "actual_date": "2026-09-03T00:00:00Z",
+                    "planned_date": "2026-09-03T00:00:00Z",
+                },
+            },
+        }
+    ],
+}
+
+
+def test_gocomet_parse_pending_has_no_events():
+    parsed = GoCometTracker._parse(GOCOMET_RAW_PENDING)
+    assert parsed["status"] == "pending"
+    assert parsed["tracking_id"] == "c075b480-1c05-46db-8588-8ef1c34e172b"
+    assert parsed["events"] == []
+    assert parsed["provider"] == "gocomet"
+
+
+def test_gocomet_parse_data_not_found_flattens_events_in_order():
+    parsed = GoCometTracker._parse(GOCOMET_RAW_DATA_NOT_FOUND)
+    assert parsed["status"] == "data_not_found"
+    assert parsed["invalid_reason"] == "Data not found on selected carrier"
+    assert [e["event_type"] for e in parsed["events"]] == ["gate_in", "origin_departure"]
+
+
+def test_gocomet_adapt_pending_or_not_found_is_a_miss():
+    assert GoCometHttpProvider._adapt(GoCometTracker._parse(GOCOMET_RAW_PENDING)).ok is False
+    result = GoCometHttpProvider._adapt(GoCometTracker._parse(GOCOMET_RAW_DATA_NOT_FOUND))
+    assert result.ok is False
+    assert result.error == "Data not found on selected carrier"
+    # tracking_id is preserved even on a miss - a resumed poll or a
+    # not-found result both still cost a real create call worth persisting.
+    assert result.provider_tracking_id == "fe62bba9-e82e-4753-83b5-9e1156bb9585"
+
+
+def test_gocomet_adapt_resolved_status_is_a_hit_with_events():
+    result = GoCometHttpProvider._adapt(GoCometTracker._parse(GOCOMET_RAW_RESOLVED))
+    assert result.ok is True
+    assert result.status == "In Transit"
+    assert result.location == "Rotterdam"
+    assert result.vessel == "MSC OSCAR"
+    assert result.voyage == "001W"
+    assert len(result.events) == 2
+    assert result.provider_tracking_id == "11111111-1111-1111-1111-111111111111"

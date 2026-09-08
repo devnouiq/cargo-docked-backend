@@ -349,9 +349,45 @@ class ContainerService:
                     db.commit()
                 raise
 
+    @staticmethod
+    def _persist_tracking_id_early(container_id: uuid.UUID, tracking_id: str) -> None:
+        """`on_created` callback passed into `registry.track()` - fires the
+        instant a provider (currently only GoComet) obtains a *new*
+        provider-side tracking id, before that provider starts polling it.
+
+        Opens its own short-lived `SessionLocal()` rather than touching the
+        caller's `db` Session: this runs inside the provider's blocking call,
+        which `registry.py`'s adapters dispatch to a worker thread via
+        `asyncio.to_thread` - the caller's Session is not thread-safe to
+        share across that boundary, but a fresh Session-per-call is.
+
+        Committed here, immediately - not deferred to `_refresh_and_apply`'s
+        own commit at the end - specifically so a crashed/killed worker
+        mid-poll doesn't lose an id that already cost one GoComet create call
+        against its monthly quota; the next attempt can resume it instead of
+        creating a duplicate.
+        """
+        with SessionLocal() as db:
+            container = db.get(TrackedContainer, container_id)
+            if container is not None:
+                container.provider_tracking_id = tracking_id
+                db.commit()
+
     async def _refresh_and_apply(self, db: Session, container: TrackedContainer) -> None:
         previous_status = container.status
-        result = await self.registry.track(container.container_number)
+        result = await self.registry.track(
+            container.container_number,
+            resume_id=container.provider_tracking_id,
+            on_created=lambda tid: self._persist_tracking_id_early(container.id, tid),
+        )
+        # Reflect whatever the provider ended up using (new id from a fresh
+        # create, the same resumed id, or unchanged if this provider has no
+        # such concept - e.g. Romeu) onto the in-memory object the rest of
+        # this method commits below, so `db.commit()` doesn't silently
+        # revert the early commit above back to whatever `container` held
+        # when this method started.
+        if result.provider_tracking_id is not None:
+            container.provider_tracking_id = result.provider_tracking_id
 
         if not result.ok:
             # A provider that ran cleanly and found nothing is NO_DATA, not

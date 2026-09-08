@@ -2,18 +2,20 @@
 `/v1/containers` API (services/container_service.py) and however many
 carrier/terminal data sources actually exist underneath.
 
-The default registry is API-only: searates_http (broad HTTP coverage) and
-romeu_http (Romeu's own API, ROMU-prefixed numbers only), each wrapped by
-a small adapter below that normalizes its native response shape into
-`NormalizedTrackingResult` (providers/base.py). The two browser-automation
-providers (track_trace_browser, searates_browser) are NOT wired into
-`build_default_registry()` - a real headless browser per lookup is much
-slower than an HTTP call and this product deliberately relies on
-API-based automation only for live tracking. Their adapter classes stay
-importable below for the internal debug router
-(routers/searates_debug.py, `/v1/track-searates-browser/*`) and for
-manual comparison/diagnostic use - just not part of the customer-facing
-lookup path.
+The default registry is API-only: gocomet_http (broad HTTP coverage - this
+project's primary source as of the SeaRates -> GoComet swap) and romeu_http
+(Romeu's own API, ROMU-prefixed numbers only), each wrapped by a small
+adapter below that normalizes its native response shape into
+`NormalizedTrackingResult` (providers/base.py). SearatesHttpProvider stays
+defined in this file (searates_http.py itself is untouched, per repo
+convention) but is no longer referenced from `build_default_registry()` -
+kept importable for the internal debug router's other routes and for
+manual comparison. The two browser-automation providers (track_trace_browser,
+searates_browser) are likewise NOT wired into `build_default_registry()` -
+a real headless browser per lookup is much slower than an HTTP call and
+this product deliberately relies on API-based automation only for live
+tracking. Their adapter classes stay importable below for manual
+comparison/diagnostic use - just not part of the customer-facing lookup path.
 
 Adding a paid aggregator later (Terminal49, Vizion, project44) means
 writing one more adapter class with a `track()` method in this same shape
@@ -23,7 +25,7 @@ needs to change, since routers/services only ever talk to
 
 Providers are tried in order; the first one that returns `ok=True` wins.
 Order is cost/reliability driven: cheap + narrow (Romeu, only claims its
-own ROMU prefix) first, then the broad HTTP-based SeaRates client.
+own ROMU prefix) first, then the broad HTTP-based GoComet client.
 """
 
 from __future__ import annotations
@@ -35,6 +37,10 @@ from datetime import datetime, timezone
 
 from ..core.config import settings
 from .base import NormalizedEvent, NormalizedTrackingResult, TrackingProvider
+from .gocomet_http import GoCometTracker
+from .gocomet_http import RateLimited as GoCometRateLimited
+from .gocomet_http import TrackerConfig as GoCometTrackerConfig
+from .gocomet_http import TrackingNotFound as GoCometTrackingNotFound
 from .romeu_http import RomeuShippingTracker, RomeuTrackerConfig
 from .searates_browser import scrape_searates
 from .searates_http import RateLimited, SeaRatesTracker, TrackerConfig
@@ -45,6 +51,11 @@ logger = logging.getLogger(__name__)
 _FAILURE_STATUS_MARKERS = (
     "failed", "fetcher error", "error:", "blocked", "no carrier", "invalid", "no tracking",
 )
+
+# GoComet top-level `status` values observed/expected to mean "resolved, but
+# the carrier had nothing for this number" - see gocomet_http.py's module
+# docstring for what was actually captured live.
+_GOCOMET_NOT_FOUND_STATUSES = frozenset({"data_not_found", "invalid"})
 
 
 def _looks_like_failure(status: str | None) -> bool:
@@ -219,7 +230,12 @@ class SearatesHttpProvider:
     def _attempt(self, container_number: str) -> asyncio.Task:
         return asyncio.ensure_future(self._run_attempt(container_number))
 
-    async def track(self, container_number: str) -> NormalizedTrackingResult:
+    async def track(
+        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+    ) -> NormalizedTrackingResult:
+        # No create-then-poll concept for SeaRates - resume_id/on_created
+        # are part of the shared TrackingProvider protocol (see base.py) for
+        # GoComet's sake, ignored here.
         task_a = self._attempt(container_number)
         done, _ = await asyncio.wait({task_a}, timeout=self._HEDGE_DELAY_S)
 
@@ -316,6 +332,124 @@ class SearatesHttpProvider:
         )
 
 
+class GoCometHttpProvider:
+    """Adapts providers/gocomet_http.py - GoComet's create-then-poll public
+    tracking API, this project's primary broad-coverage tracking source
+    (replaces SearatesHttpProvider, kept defined above but no longer wired
+    into build_default_registry()).
+
+    Same thread-local tracker-pooling shape as SearatesHttpProvider, for the
+    same reason (a fresh GoCometTracker per call pays real session/proxy
+    setup cost every time; reused per-thread, only the first call on a
+    thread pays it). Deliberately NOT hedged (unlike SearatesHttpProvider):
+    a second parallel attempt here would mean a second POST create call
+    against the same scarce *monthly* quota for no benefit, since GoComet's
+    resolution time is dominated by its own server-side carrier scrape, not
+    by our connection - hedging buys nothing and doubles quota spend.
+    """
+
+    name = "gocomet_http"
+
+    _ATTEMPT_TIMEOUT_S = 95.0  # comfortably above GoCometTracker's own poll_timeout_s=80s budget
+
+    _DEFAULT_MAX_CONCURRENT = 8
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+        self._semaphore = asyncio.Semaphore(self._DEFAULT_MAX_CONCURRENT)
+
+    def configure_concurrency(self, max_concurrent: int) -> None:
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    def supports(self, container_number: str) -> bool:
+        return True
+
+    def _get_tracker(self) -> GoCometTracker:
+        tracker = getattr(self._local, "tracker", None)
+        if tracker is None:
+            tracker = GoCometTracker(GoCometTrackerConfig(**_tracker_proxy_kwargs()))
+            self._local.tracker = tracker
+        return tracker
+
+    def _track_sync(self, container_number: str, resume_id: str | None, on_created) -> dict:
+        tracker = self._get_tracker()
+        try:
+            return tracker.track(container_number, resume_id=resume_id, on_created=on_created)
+        except Exception:
+            self._local.tracker = None
+            raise
+
+    async def track(
+        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+    ) -> NormalizedTrackingResult:
+        async with self._semaphore:
+            try:
+                raw = await asyncio.wait_for(
+                    asyncio.to_thread(self._track_sync, container_number, resume_id, on_created),
+                    timeout=self._ATTEMPT_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                return NormalizedTrackingResult(ok=False, error=f"gocomet_http timed out after {self._ATTEMPT_TIMEOUT_S:.0f}s")
+            except (GoCometRateLimited, GoCometTrackingNotFound) as exc:
+                return NormalizedTrackingResult(ok=False, error=str(exc))
+            except Exception as exc:  # noqa: BLE001 - one provider's bug must not sink the whole lookup
+                return NormalizedTrackingResult(ok=False, error=str(exc))
+        return self._adapt(raw)
+
+    async def warm(self, count: int) -> None:
+        async def _warm_one() -> None:
+            try:
+                async with self._semaphore:
+                    # Cheap warm-up: just build+proxy-connect the session,
+                    # no real create call (unlike SeaRates' warm(), which
+                    # does a real lookup) - a placeholder create call here
+                    # would burn real monthly quota for nothing.
+                    await asyncio.to_thread(self._get_tracker)
+            except Exception:  # noqa: BLE001
+                pass
+
+        await asyncio.gather(*[_warm_one() for _ in range(count)])
+
+    @staticmethod
+    def _adapt(parsed: dict) -> NormalizedTrackingResult:
+        # `parsed` is already GoCometTracker.track()'s flattened output
+        # (that method returns `_parse()`'s shape directly, matching
+        # SeaRatesTracker.track()'s convention) - no further parsing here.
+        status = (parsed.get("status") or "").lower()
+        ops_status = (parsed.get("ops_status") or "").lower()
+
+        if status == "pending" or status in _GOCOMET_NOT_FOUND_STATUSES or ops_status == "marked_invalid":
+            return NormalizedTrackingResult(
+                ok=False,
+                error=parsed.get("invalid_reason") or parsed.get("display_status") or status or "no data returned",
+                raw_data=parsed,
+                provider_tracking_id=parsed.get("tracking_id"),
+            )
+
+        events = [
+            NormalizedEvent(
+                event_code=str(e.get("event_type") or "unknown").strip().lower(),
+                description=e.get("event_type"),
+                location=e.get("location"),
+                vessel=e.get("vessel"),
+                voyage=e.get("voyage"),
+                occurred_at=_parse_date(e.get("actual_date") or e.get("planned_date")),
+                actual=bool(e.get("is_actual")),
+            )
+            for e in parsed.get("events") or []
+        ]
+        return NormalizedTrackingResult(
+            ok=True,
+            status=parsed.get("display_status") or status,
+            location=parsed.get("current_location"),
+            vessel=next((e.vessel for e in reversed(events) if e.vessel), None),
+            voyage=next((e.voyage for e in reversed(events) if e.voyage), None),
+            events=events,
+            raw_data=parsed,
+            provider_tracking_id=parsed.get("tracking_id"),
+        )
+
+
 class RomeuHttpProvider:
     """Adapts providers/romeu_http.py (untouched) - Romeu Shipping's own API,
     only relevant for containers it operates directly (ROMU prefix)."""
@@ -325,7 +459,9 @@ class RomeuHttpProvider:
     def supports(self, container_number: str) -> bool:
         return container_number.strip().upper().startswith("ROMU")
 
-    async def track(self, container_number: str) -> NormalizedTrackingResult:
+    async def track(
+        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+    ) -> NormalizedTrackingResult:
         tracker = RomeuShippingTracker(RomeuTrackerConfig(**_tracker_proxy_kwargs()))
         try:
             raw = await asyncio.to_thread(tracker.track, container_number)
@@ -423,14 +559,20 @@ class ProviderRegistry:
     def provider_names(self) -> list[str]:
         return [p.name for p in self._providers]
 
-    async def track(self, container_number: str) -> NormalizedTrackingResult:
+    async def track(
+        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+    ) -> NormalizedTrackingResult:
+        """`resume_id`/`on_created` are forwarded to whichever provider ends
+        up handling this number - only meaningful to providers with a
+        create-then-poll concept (currently GoComet); every other provider's
+        `track()` accepts and ignores them (see base.py's Protocol)."""
         attempted: list[str] = []
         for provider in self._providers:
             if not provider.supports(container_number):
                 continue
             attempted.append(provider.name)
             try:
-                result = await provider.track(container_number)
+                result = await provider.track(container_number, resume_id=resume_id, on_created=on_created)
             except Exception:  # noqa: BLE001 - one provider's bug must not sink the whole lookup
                 logger.exception("provider %s raised while tracking %s", provider.name, container_number)
                 continue
@@ -497,7 +639,7 @@ def build_default_registry() -> ProviderRegistry:
         _default_registry = ProviderRegistry(
             [
                 RomeuHttpProvider(),
-                SearatesHttpProvider(),
+                GoCometHttpProvider(),
             ]
         )
     return _default_registry

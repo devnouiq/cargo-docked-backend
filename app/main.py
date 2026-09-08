@@ -25,16 +25,17 @@ from .workers.redis_pool import close_arq_pool
 configure_logging(settings.log_level)
 
 # This process's reserved slice of Oxylabs' account-wide concurrent-
-# connection limit (~18-20 total, measured live - see
-# SearatesHttpProvider.configure_concurrency for why this is a static
-# per-process split rather than a shared/coordinated limiter). The API
+# connection limit (~18-20 total, measured live against SeaRates - see
+# GoCometHttpProvider.configure_concurrency for why this is a static
+# per-process split rather than a shared/coordinated limiter; kept as the
+# same budget post-swap, not re-measured against GoComet specifically). The API
 # process and the arq worker process (workers/arq_app.py, its own slice:
 # 12) each get a fixed, non-overlapping budget, so a customer's single
 # lookup can never be queued behind the worker's bulk background scraping -
 # they're different processes spending from different budgets, not
 # competing for the same pool. 6 + 12 = 18, safely under the observed
 # ceiling with margin.
-_MAX_CONCURRENT_SEARATES_CONNECTIONS = 6
+_MAX_CONCURRENT_GOCOMET_CONNECTIONS = 6
 
 # How many of this process's connections to warm up proactively at startup,
 # so early real requests land on an already-warm one instead of each
@@ -42,9 +43,9 @@ _MAX_CONCURRENT_SEARATES_CONNECTIONS = 6
 # process's own concurrency budget above - warming goes through the same
 # semaphore as real traffic, so warming more than the budget would just
 # queue instead of actually running any faster.
-_WARM_POOL_SIZE = _MAX_CONCURRENT_SEARATES_CONNECTIONS
+_WARM_POOL_SIZE = _MAX_CONCURRENT_GOCOMET_CONNECTIONS
 
-# registry.py's SearatesHttpProvider uses asyncio.to_thread for its live
+# registry.py's GoCometHttpProvider uses asyncio.to_thread for its live
 # lookups, which shares the event loop's *default* executor - Python sizes
 # that to min(32, cpu_count()+4) threads by default (20 on a 16-core box).
 # Many concurrent single-container lookups (customers hitting /v1/containers
@@ -76,7 +77,7 @@ async def lifespan(app: FastAPI):
     # here would mean this startup warm-up fires real requests against
     # SeaRates on every test that spins up a TestClient.
     registry = container_service.build_default_registry()
-    registry.configure_concurrency(_MAX_CONCURRENT_SEARATES_CONNECTIONS)
+    registry.configure_concurrency(_MAX_CONCURRENT_GOCOMET_CONNECTIONS)
     app.state.warm_task = asyncio.create_task(registry.warm(_WARM_POOL_SIZE))
     yield
     await close_scraper_session()

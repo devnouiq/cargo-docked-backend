@@ -56,33 +56,47 @@ this split, not by copying whichever dependency happens to be nearby.
 ## The provider registry (the "carrier data engine")
 
 `app/providers/registry.py` is the adapter-pattern seam mentioned in the
-original product brief. Today it wraps four existing scrapers behind one
+original product brief. Today it wraps five scrapers behind one
 `TrackingProvider` interface (`app/providers/base.py`):
 
 | Provider | File | Notes |
 |---|---|---|
-| `searates_http` | `providers/searates_http.py` | **Do not modify.** Polite, TLS-impersonated HTTP client - primary source. Load-tested rate-limit/proxy-rotation logic lives here. |
+| `gocomet_http` | `providers/gocomet_http.py` | **Primary source** (replaced `searates_http` - see below). Create-then-poll HTTP client against GoComet's public tracking API, Oxylabs proxy-rotation on its monthly quota limit. Supports resuming a poll via a persisted `provider_tracking_id` (`TrackedContainer.provider_tracking_id`) instead of always creating fresh - see `ContainerService._persist_tracking_id_early`/`_refresh_and_apply`. |
 | `romeu_http` | `providers/romeu_http.py` | Romeu Shipping's own API, only claims ROMU-prefixed numbers. |
+| `searates_http` | `providers/searates_http.py` | **Do not modify.** No longer referenced from `build_default_registry()` (superseded by `gocomet_http`) or from `routers/searates_debug.py` (its two live routes now call `gocomet_http.GoCometTracker` too - see below). File kept as-is per repo convention; currently unused by any live route, but not deleted. |
 | `track_trace_browser` | `providers/track_trace_browser.py` | Broad carrier coverage via a real headless browser. |
-| `searates_browser` | `providers/searates_browser.py` | Browser-based SeaRates fallback/diagnostic. |
+| `searates_browser` | `providers/searates_browser.py` | Browser-based SeaRates fallback/diagnostic, still used by `/v1/track-searates-browser/*` only. |
 
 `ProviderRegistry.track()` tries each provider in order (cheapest/most
 reliable first) until one returns `ok=True`. **To add a real data
 aggregator later (Terminal49/Vizion/project44):** write one more adapter
-class with an async `track(number) -> NormalizedTrackingResult` method and
-a `supports(number) -> bool`, append it to `build_default_registry()`.
-Nothing else in the app needs to change - services/routers only ever call
-the registry, never a specific scraper.
+class with an async `track(number, *, resume_id=None, on_created=None) ->
+NormalizedTrackingResult` method and a `supports(number) -> bool`, append
+it to `build_default_registry()`. Nothing else in the app needs to change -
+services/routers only ever call the registry, never a specific scraper.
+`resume_id`/`on_created` only matter to a provider with a create-then-poll
+concept (currently just GoComet) - every other provider's `track()` accepts
+and ignores them.
 
 ## Files that must not change behavior
 
 - **`app/providers/searates_http.py`** - production-quality, load-tested
-  rate-limit/proxy-rotation logic. Wrap it (see `registry.py`), don't edit it.
+  rate-limit/proxy-rotation logic. No longer wired into
+  `build_default_registry()` or `routers/searates_debug.py` (both now use
+  `gocomet_http.py` - see the provider table above) as of the SeaRates ->
+  GoComet swap, but the file itself is still untouched/unmodified per this
+  convention - don't delete it either, it may be useful as a reference or a
+  future fallback.
 - **`app/routers/searates_debug.py`** - internal debug router
-  (`/v1/track-searates*`, `/v1/track-searates-browser/*`). Kept mounted
-  and working exactly as before; new product routes live in
-  `routers/v1/containers.py` instead. If you need to touch the shared
-  `ContainerResult` cache table it reads/writes, go through
+  (`/v1/track-searates*`, `/v1/track-searates-browser/*`), URL paths kept
+  stable for frontend compatibility. **Note:** the "do not modify" framing
+  originally applied to this whole file; as of the SeaRates -> GoComet swap,
+  the two live-data routes' *underlying tracker* was deliberately changed
+  from `SeaRatesTracker` to `GoCometTracker` (a direct product decision, not
+  a violation of this convention) - `track_searates_browser` (still real
+  SeaRates via a browser) is unrelated and untouched. New product routes
+  live in `routers/v1/containers.py` instead. If you need to touch the
+  shared `ContainerResult` cache table it reads/writes, go through
   `app/repositories/container_cache.py` (the same repository it already
   uses), not a new path.
 - **`app/database.py`, `app/config.py`, `app/schemas/legacy.py`** -

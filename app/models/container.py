@@ -69,6 +69,13 @@ class TrackedContainer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         "tracking_status", Enum(ContainerScrapeStatus, native_enum=False, length=20), default=ContainerScrapeStatus.QUEUED, nullable=False
     )
     tracking_message: Mapped[str | None] = mapped_column("tracking_message", String(500), nullable=True)
+    # Upstream provider's own tracking-request id (currently only ever set by
+    # gocomet_http.py's create-then-poll flow). Committed as soon as it's
+    # obtained - before polling starts - so a crashed/killed worker mid-poll
+    # doesn't lose it; a later refresh resumes polling this id instead of
+    # paying for a fresh create against GoComet's monthly quota. None for
+    # providers with no such concept.
+    provider_tracking_id: Mapped[str | None] = mapped_column("provider_tracking_id", String(100), nullable=True)
 
     events: Mapped[list["ContainerEvent"]] = relationship(
         back_populates="container", cascade="all, delete-orphan", order_by="ContainerEvent.occurred_at"

@@ -120,6 +120,45 @@ async def test_scrape_marks_failed_without_propagating_when_apply_raises(db_sess
 
 
 @pytest.mark.asyncio
+async def test_tracking_id_survives_a_crash_mid_poll(db_session, api_key, _fake_provider_registry):
+    """Regression test for the GoComet resume design: `on_created` must be
+    persisted (via ContainerService._persist_tracking_id_early) the instant
+    it fires, not only if the overall provider call later succeeds - a
+    worker crash/exception after `on_created` but before a final result must
+    not lose the id."""
+    org_id = _org_id_for(db_session, api_key)
+    container = _queued_container(db_session, organization_id=org_id, number="MSKU1234567")
+
+    async def _track_then_crash(container_number, *, resume_id=None, on_created=None):
+        if on_created is not None:
+            on_created("gocomet-tracking-id-123")
+        raise RuntimeError("simulated crash mid-poll")
+
+    _fake_provider_registry.track = _track_then_crash
+
+    await scrape_container({}, str(container.id))
+
+    refreshed = _reload(db_session, container.id)
+    assert refreshed.provider_tracking_id == "gocomet-tracking-id-123"
+    assert refreshed.tracking_status == ContainerScrapeStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_resume_id_is_forwarded_from_a_previously_persisted_tracking_id(db_session, api_key, _fake_provider_registry):
+    """The next attempt after a crash (previous test) must hand the stored
+    id back to the provider as `resume_id`, so GoComet can poll instead of
+    creating fresh."""
+    org_id = _org_id_for(db_session, api_key)
+    container = _queued_container(db_session, organization_id=org_id, number="MSKU1234567")
+    container.provider_tracking_id = "already-stored-id-456"
+    db_session.commit()
+
+    await scrape_container({}, str(container.id))
+
+    assert _fake_provider_registry.resume_ids == ["already-stored-id-456"]
+
+
+@pytest.mark.asyncio
 async def test_scrape_of_a_missing_container_is_a_clean_noop(db_session, api_key):
     await scrape_container({}, str(uuid.uuid4()))  # never existed
 

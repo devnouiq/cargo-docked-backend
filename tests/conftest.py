@@ -98,9 +98,13 @@ class _FakeProviderRegistry:
 
     def __init__(self):
         self.calls: list[str] = []
+        self.resume_ids: list[str | None] = []
 
-    async def track(self, container_number: str) -> NormalizedTrackingResult:
+    async def track(
+        self, container_number: str, *, resume_id: str | None = None, on_created=None
+    ) -> NormalizedTrackingResult:
         self.calls.append(container_number)
+        self.resume_ids.append(resume_id)
         if container_number.upper().startswith("MISS"):
             return NormalizedTrackingResult(ok=False, error="not found by fake provider")
         return NormalizedTrackingResult(
