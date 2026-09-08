@@ -93,6 +93,17 @@ class TrackingNotFound(Exception):
     fresh create rather than treating this as a hard failure."""
 
 
+class CarrierNotResolved(Exception):
+    """Raised when create_tracking() has no carrier_code to work with: none
+    was given, and GoComet's own auto-suggest endpoint (`suggest_carrier`)
+    came back with no mapping for this number - a legitimate "we don't know
+    the carrier" outcome (confirmed live: `auto_map_carrier` is `null`, not
+    an error, for a number GoComet's auto-detect doesn't recognize), not a
+    network/proxy failure. A generic RuntimeError here would've surfaced as
+    an unstyled 500 through any route that doesn't special-case it - callers
+    should catch this and return a clean 4xx / normalized miss instead."""
+
+
 def _mask_proxy_url(url: Optional[str]) -> str:
     if not url:
         return "NONE"
@@ -212,7 +223,10 @@ class GoCometTracker:
         if not carrier_code:
             carrier_code = self.suggest_carrier(number)
         if not carrier_code:
-            raise RuntimeError(f"could not resolve a carrier_code for {number!r}")
+            raise CarrierNotResolved(
+                f"could not determine a carrier for {number!r} - "
+                "no carrier_code given and GoComet's auto-suggest has no mapping for this number"
+            )
 
         body = {"tracking": {"tracking_number": number, "mode": mode, "carrier_code": carrier_code}}
         resp = self._session.post(

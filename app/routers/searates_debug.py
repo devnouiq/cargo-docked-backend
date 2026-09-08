@@ -18,7 +18,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from ..config import settings
-from ..providers.gocomet_http import RateLimited, GoCometTracker, TrackerConfig
+from ..providers.gocomet_http import CarrierNotResolved, RateLimited, GoCometTracker, TrackerConfig
 from ..providers.searates_browser import scrape_searates
 from ..schemas import BulkTrackRequest
 from ..services.bulk_tracking_service import track_many_parallel, track_with_cache
@@ -53,6 +53,11 @@ async def track_searates(number: str, sealine: str = "AUTO"):
         result = await asyncio.to_thread(track_with_cache, tracker, number, sealine)
     except RateLimited as e:
         raise HTTPException(status_code=429, detail=f"GoComet rate limited: {e}")
+    except CarrierNotResolved as e:
+        # A legitimate "we don't know the carrier" outcome, not a server
+        # error - see CarrierNotResolved's docstring. Client should retry
+        # with an explicit ?sealine=<CARRIER_CODE>.
+        raise HTTPException(status_code=422, detail=str(e))
     return result
 
 
