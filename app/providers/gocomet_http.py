@@ -246,7 +246,24 @@ class GoCometTracker:
         last_status = None
 
         while time.monotonic() < deadline:
-            resp = self._session.get(url, headers=self._headers(), timeout=self.config.request_timeout_s)
+            try:
+                resp = self._session.get(url, headers=self._headers(), timeout=self.config.request_timeout_s)
+            except RequestException as exc:
+                # Transient network/proxy failure (e.g. a dropped Oxylabs
+                # connection under concurrent load - observed live: "Connection
+                # closed abruptly" mid-poll) - unlike create_tracking()'s
+                # single request, this loop can just try again on the next
+                # tick instead of failing the whole lookup. Bounded by this
+                # method's own `deadline`, same as any other slow-to-resolve
+                # poll - not counted against max_rotations, since this isn't
+                # necessarily an exit-IP-specific problem.
+                logger.warning(
+                    "[%s] poll %s network error (%s: %s); retrying within poll budget",
+                    self._label, tracking_id, type(exc).__name__, exc,
+                )
+                time.sleep(min(self.config.poll_interval_s, 5.0))
+                elapsed += min(self.config.poll_interval_s, 5.0)
+                continue
             if resp.status_code == 404:
                 raise TrackingNotFound(tracking_id)
             if _looks_rate_limited(resp) or _looks_quota_exceeded(resp):
@@ -293,6 +310,15 @@ class GoCometTracker:
         """
         number = number.strip().upper()
         waited = 0.0
+        rotations = 0
+
+        def _rotations_exhausted() -> bool:
+            # Primary bound for a synchronous single lookup: a fixed number
+            # of exit-IP swaps (matches load_test_gocomet.py's proven
+            # design), not max_wait_total_s (3h - meant as an outer safety
+            # ceiling for long-lived background/bulk use, far too generous
+            # for a request-response call on its own).
+            return rotations >= self.config.max_rotations or waited >= self.config.max_wait_total_s
 
         if resume_id:
             try:
@@ -309,54 +335,75 @@ class GoCometTracker:
             except RateLimited:
                 # A limited resume attempt still burned this exit IP -
                 # rotate before falling through to a fresh create below.
-                if waited >= self.config.max_wait_total_s:
+                if _rotations_exhausted():
                     raise
+                rotations += 1
                 self._rotate_session(reason=f"rate limit resuming {number}")
 
+        new_id: Optional[str] = None
         while True:
-            try:
-                created = self.create_tracking(number, carrier_code, mode)
-            except RateLimited:
-                if waited >= self.config.max_wait_total_s:
-                    raise
-                self._rotate_session(reason=f"rate limit creating {number}")
-                nap = min(self.config.rotate_pause_s, self.config.max_wait_total_s - waited)
-                time.sleep(nap)
-                waited += nap
-                continue
-            except RequestException as exc:
-                if waited >= self.config.max_wait_total_s:
-                    raise
-                nap = min(15.0, self.config.max_wait_total_s - waited)
-                logger.warning(
-                    "[%s] request error creating %s via proxy=%s (%s: %s); retrying in %.0fs",
-                    self._label, number, _mask_proxy_url(self._session.proxies.get("https")),
-                    type(exc).__name__, exc, nap,
-                )
-                time.sleep(nap)
-                waited += nap
-                continue
+            if new_id is None:
+                # No id yet (first attempt, or a previous one expired) -
+                # need a fresh create. Once we have one, a rate limit while
+                # POLLING it (below) retries the SAME id instead of looping
+                # back here - abandoning a paid-for id for a brand new one
+                # on every poll-time rate limit would waste GoComet's
+                # monthly quota far faster than necessary.
+                try:
+                    created = self.create_tracking(number, carrier_code, mode)
+                except RateLimited:
+                    if _rotations_exhausted():
+                        raise
+                    rotations += 1
+                    self._rotate_session(reason=f"rate limit creating {number}")
+                    nap = min(self.config.rotate_pause_s, self.config.max_wait_total_s - waited)
+                    time.sleep(nap)
+                    waited += nap
+                    continue
+                except RequestException as exc:
+                    if _rotations_exhausted():
+                        raise
+                    rotations += 1
+                    nap = min(15.0, self.config.max_wait_total_s - waited)
+                    logger.warning(
+                        "[%s] request error creating %s via proxy=%s (%s: %s); retrying in %.0fs",
+                        self._label, number, _mask_proxy_url(self._session.proxies.get("https")),
+                        type(exc).__name__, exc, nap,
+                    )
+                    time.sleep(nap)
+                    waited += nap
+                    continue
 
-            new_id = created.get("id")
-            if not new_id:
-                raise RuntimeError(f"create_tracking response had no id: {created}")
-            if on_created is not None:
-                on_created(new_id)
+                new_id = created.get("id")
+                if not new_id:
+                    raise RuntimeError(f"create_tracking response had no id: {created}")
+                if on_created is not None:
+                    on_created(new_id)
 
-            status = created.get("status")
-            if status and status != "pending":
-                return self._finalize(created, new_id)
+                status = created.get("status")
+                if status and status != "pending":
+                    return self._finalize(created, new_id)
 
             try:
                 raw = self.poll(new_id)
                 return self._finalize(raw, new_id)
             except RateLimited:
-                if waited >= self.config.max_wait_total_s:
+                if _rotations_exhausted():
                     raise
+                rotations += 1
                 self._rotate_session(reason=f"rate limit polling {number}")
                 nap = min(self.config.rotate_pause_s, self.config.max_wait_total_s - waited)
                 time.sleep(nap)
                 waited += nap
+                continue  # retries poll(new_id) - same id, no new create
+            except TrackingNotFound:
+                # Shouldn't normally happen for an id we just created, but
+                # if GoComet drops it mid-flight, get a fresh one rather
+                # than looping on an id that will never resolve.
+                if _rotations_exhausted():
+                    raise
+                rotations += 1
+                new_id = None
                 continue
             except TimeoutError:
                 # Not resolved within this attempt's poll budget - not a

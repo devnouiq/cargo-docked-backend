@@ -27,6 +27,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["searates-debug"])
 
+# Defense in depth for the single-lookup route: GoCometTracker.track()'s own
+# retry loop is bounded by max_rotations (not by this), but a synchronous
+# HTTP route still needs its own hard ceiling so a pathological run of
+# rotations can't leave a request hanging for minutes with no bound of its
+# own - observed live under concurrent load: some attempts took 80-90s
+# before this existed. Bulk (track_many_parallel) already has an equivalent
+# bound (_ATTEMPT_TIMEOUT_S in bulk_tracking_service.py) - this mirrors it.
+_SINGLE_LOOKUP_TIMEOUT_S = 120.0
+
 
 def _tracker_proxy_kwargs() -> dict:
     return {
@@ -50,7 +59,9 @@ async def track_searates(number: str, sealine: str = "AUTO"):
     """
     tracker = GoCometTracker(TrackerConfig(**_tracker_proxy_kwargs()))
     try:
-        result = await asyncio.to_thread(track_with_cache, tracker, number, sealine)
+        result = await asyncio.wait_for(
+            asyncio.to_thread(track_with_cache, tracker, number, sealine), timeout=_SINGLE_LOOKUP_TIMEOUT_S
+        )
     except RateLimited as e:
         raise HTTPException(status_code=429, detail=f"GoComet rate limited: {e}")
     except CarrierNotResolved as e:
@@ -58,6 +69,11 @@ async def track_searates(number: str, sealine: str = "AUTO"):
         # error - see CarrierNotResolved's docstring. Client should retry
         # with an explicit ?sealine=<CARRIER_CODE>.
         raise HTTPException(status_code=422, detail=str(e))
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail=f"GoComet did not resolve {number!r} within {_SINGLE_LOOKUP_TIMEOUT_S:.0f}s - try again shortly.",
+        )
     return result
 
 
