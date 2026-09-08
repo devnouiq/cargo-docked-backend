@@ -373,6 +373,22 @@ GOCOMET_RAW_DATA_NOT_FOUND = {
     ],
 }
 
+# Genuinely captured live - an invalid ISO 6346 check digit (container
+# number "ONEU0000001", made up for a load test, not a real one). Unlike
+# GOCOMET_RAW_DATA_NOT_FOUND above, GoComet rejects this before ever
+# creating a real tracking record: `id` comes back None and `status` is
+# "invalid_tracking" (not "pending"), which crashed create_tracking()'s
+# original id-required check - see gocomet_http.py's track() for the fix.
+GOCOMET_RAW_INVALID_NUMBER = {
+    "id": None,
+    "tracking_number": "ONEU0000001",
+    "status": "invalid_tracking",
+    "ops_status": "marked_invalid",
+    "invalid_or_yet_to_start_reason": "Your entered container number check digit is invalid",
+    "carrier": {"code": "ONEY", "name": "ONE Line"},
+    "shiploads": [],
+}
+
 # Genuinely captured live (a real 50+10-container load test against
 # production found this, not a synthetic sample like the two fixtures
 # above) - container CBHU4350204, carrier COSCO. This is what surfaced the
@@ -426,6 +442,33 @@ GOCOMET_RAW_RESOLVED = {
         }
     ],
 }
+
+
+def test_gocomet_track_handles_a_rejected_number_with_no_id():
+    """Regression test for the crash found live: create_tracking() can come
+    back with a terminal (non-pending) status AND no id at all (GoComet
+    rejects some numbers - e.g. a bad ISO 6346 check digit - before ever
+    creating a real tracking record). track() must return a normal result,
+    not raise, and must not call on_created for a number that was never
+    actually created."""
+    tracker = GoCometTracker()
+    created_ids = []
+
+    def _fake_create_tracking(number, carrier_code, mode):
+        return GOCOMET_RAW_INVALID_NUMBER
+
+    tracker.create_tracking = _fake_create_tracking
+
+    result = tracker.track("ONEU0000001", carrier_code="ONEY", on_created=created_ids.append)
+
+    assert result["status"] == "invalid_tracking"
+    assert result["tracking_id"] is None
+    assert result["invalid_reason"] == "Your entered container number check digit is invalid"
+    assert created_ids == []  # on_created never fires - no id was ever created
+
+    adapted = GoCometHttpProvider._adapt(result)
+    assert adapted.ok is False
+    assert adapted.error == "Your entered container number check digit is invalid"
 
 
 def test_gocomet_parse_pending_has_no_events():

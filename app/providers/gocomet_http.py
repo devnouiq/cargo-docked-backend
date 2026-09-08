@@ -328,7 +328,7 @@ class GoCometTracker:
             # for a request-response call on its own).
             return rotations >= self.config.max_rotations or waited >= self.config.max_wait_total_s
 
-        def _finalize_timed(raw: dict, tracking_id: str, *, create_call_s: Optional[float], poll_call_s: Optional[float]) -> dict:
+        def _finalize_timed(raw: dict, tracking_id: Optional[str], *, create_call_s: Optional[float], poll_call_s: Optional[float]) -> dict:
             return self._finalize(
                 raw, tracking_id,
                 create_call_s=create_call_s, poll_call_s=poll_call_s, total_call_s=time.monotonic() - t_start,
@@ -393,17 +393,24 @@ class GoCometTracker:
                 create_call_s = time.monotonic() - create_t0
 
                 new_id = created.get("id")
+                status = created.get("status")
+
+                if status and status != "pending":
+                    # Resolved (or rejected) on the create response itself -
+                    # no poll phase needed. Confirmed live: an invalid
+                    # container number (bad ISO 6346 check digit) comes back
+                    # with status="invalid_tracking", id=None - a genuine
+                    # terminal outcome, not a bug; only fire on_created and
+                    # require an id below for the case that actually needs
+                    # one (polling).
+                    if new_id and on_created is not None:
+                        on_created(new_id)
+                    return _finalize_timed(created, new_id, create_call_s=create_call_s, poll_call_s=0.0)
+
                 if not new_id:
-                    raise RuntimeError(f"create_tracking response had no id: {created}")
+                    raise RuntimeError(f"create_tracking response had no id and is still pending: {created}")
                 if on_created is not None:
                     on_created(new_id)
-
-                status = created.get("status")
-                if status and status != "pending":
-                    # Already resolved on the create response itself (a
-                    # previously-seen number, GoComet-side cache hit) -
-                    # no poll phase at all.
-                    return _finalize_timed(created, new_id, create_call_s=create_call_s, poll_call_s=0.0)
 
             poll_t0 = time.monotonic()
             try:
@@ -440,7 +447,7 @@ class GoCometTracker:
     def _finalize(
         cls,
         raw: dict,
-        tracking_id: str,
+        tracking_id: Optional[str],
         *,
         create_call_s: Optional[float] = None,
         poll_call_s: Optional[float] = None,
