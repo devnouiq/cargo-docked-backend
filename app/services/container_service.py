@@ -118,8 +118,17 @@ class ContainerService:
             event_type=UsageEventType.CONTAINER_LOOKUP,
             container_number=container_number,
         )
-        await self._refresh_and_apply(db, container)
+        # Commit (releasing the pooled DB connection) before the slow
+        # provider scrape, same as the worker's _process_in_own_session -
+        # otherwise this connection sits checked out of the pool for the
+        # whole scrape, and enough concurrent single-container lookups
+        # exhaust the pool for every other request (see incident 2026-09-11:
+        # QueuePool limit ... connection timed out).
+        container.tracking_status = ContainerScrapeStatus.IN_PROGRESS
         db.commit()
+        db.refresh(container)
+
+        await self._refresh_and_apply_safely(db, container)
         db.refresh(container)
         return container
 
@@ -149,8 +158,12 @@ class ContainerService:
             event_type=UsageEventType.CONTAINER_LOOKUP,
             container_number=container_number,
         )
-        await self._refresh_and_apply(db, container)
+        # See track() - release the connection before the slow scrape.
+        container.tracking_status = ContainerScrapeStatus.IN_PROGRESS
         db.commit()
+        db.refresh(container)
+
+        await self._refresh_and_apply_safely(db, container)
         db.refresh(container)
 
         return container
@@ -330,24 +343,7 @@ class ContainerService:
             container.tracking_status = ContainerScrapeStatus.IN_PROGRESS
             db.commit()
 
-            try:
-                await self._refresh_and_apply(db, container)
-                db.commit()
-            except Exception as exc:
-                # The rollback expires `container`; re-fetch before writing
-                # the terminal status or we'd just touch a detached object.
-                db.rollback()
-                failed = db.get(TrackedContainer, container_id)
-                if failed is not None:
-                    failed.tracking_status = ContainerScrapeStatus.FAILED
-                    # Customer-safe message only - the raw exception (which may
-                    # name an internal exception class or an HTTP client error)
-                    # stays server-side: it's re-raised below, and the arq task
-                    # (workers/tasks/scrape.py) logs it via logger.exception.
-                    failed.tracking_message = _FAILED_MESSAGE
-                    failed.raw_data = {**(failed.raw_data or {}), "last_error": str(exc)[:500]}
-                    db.commit()
-                raise
+            await self._refresh_and_apply_safely(db, container)
 
     @staticmethod
     def _persist_tracking_id_early(container_id: uuid.UUID, tracking_id: str) -> None:
@@ -372,6 +368,38 @@ class ContainerService:
             if container is not None:
                 container.provider_tracking_id = tracking_id
                 db.commit()
+
+    async def _refresh_and_apply_safely(self, db: Session, container: TrackedContainer) -> None:
+        """Runs `_refresh_and_apply`, committing on success - and, if the
+        provider registry raises instead of returning a normal `ok=False`
+        result, records a terminal FAILED row instead of leaving it stuck
+        `IN_PROGRESS` with an uncommitted transaction. Re-raises afterwards
+        so the caller (route handler or arq task) still sees the failure.
+
+        Shared by the synchronous API path (`track`/`get_or_refresh`) and
+        `_process_in_own_session` (the worker) so a scrape crash always
+        leaves the same customer-visible terminal state either way.
+        """
+        container_id = container.id
+        try:
+            await self._refresh_and_apply(db, container)
+            db.commit()
+        except Exception as exc:
+            # The rollback expires `container`; re-fetch before writing the
+            # terminal status or we'd just touch a detached object.
+            db.rollback()
+            failed = db.get(TrackedContainer, container_id)
+            if failed is not None:
+                failed.tracking_status = ContainerScrapeStatus.FAILED
+                # Customer-safe message only - the raw exception (which may
+                # name an internal exception class or an HTTP client error)
+                # stays server-side: it's re-raised below, and the caller
+                # (workers/tasks/scrape.py for the worker path) logs it via
+                # logger.exception.
+                failed.tracking_message = _FAILED_MESSAGE
+                failed.raw_data = {**(failed.raw_data or {}), "last_error": str(exc)[:500]}
+                db.commit()
+            raise
 
     async def _refresh_and_apply(self, db: Session, container: TrackedContainer) -> None:
         previous_status = container.status
