@@ -10,6 +10,17 @@ mechanics from casual edits, not about pinning this router to SeaRates
 specifically. `track_searates_browser` (SeaRates via a real browser) is
 left untouched/unrelated - a separate diagnostic path, not part of this
 swap.
+
+Payload split (product request: one endpoint shouldn't return the entire
+scraped dataset): `track_searates` used to return GoCometTracker._parse()'s
+whole flattened dict (status/carrier/route summary + the full event
+timeline + internal scrape timing) as an untyped `dict`, so there was no
+real OpenAPI/Swagger schema for it either. Now typed via
+`schemas/tracking_preview.py`: `track_searates` returns just the summary,
+`track_searates_events` (new, same URL prefix + `/events`) returns the
+timeline, and internal timing fields are dropped from both client-facing
+responses entirely. URL paths for the two pre-existing routes are
+unchanged - only the response shape/typing changed.
 """
 
 import asyncio
@@ -22,6 +33,13 @@ from ..providers.gocomet_http import CarrierNotResolved, RateLimited
 from ..providers.gocomet_pool import get_pool
 from ..providers.searates_browser import scrape_searates
 from ..schemas import BulkTrackRequest
+from ..schemas.tracking_preview import (
+    TrackingBulkItemOut,
+    TrackingBulkResponseOut,
+    TrackingEventOut,
+    TrackingEventsOut,
+    TrackingSummaryOut,
+)
 from ..services.bulk_tracking_service import track_many_parallel, track_with_cache
 
 logger = logging.getLogger(__name__)
@@ -46,17 +64,13 @@ def _tracker_proxy_kwargs() -> dict:
     }
 
 
-@router.get("/track-searates/{number}")
-async def track_searates(number: str, sealine: str = "AUTO"):
-    """
-    Calls GoComet's create-then-poll public tracking API directly
-    (providers/gocomet_http.py), bypassing browser automation entirely.
-    Checks the shared ContainerResult DB cache first (same cache the bulk
-    route and browser-based routes use) and only hits GoComet live on a
-    miss. `sealine` is passed straight through to GoComet as `carrier_code`
-    ("AUTO" triggers GoComet's own carrier auto-suggest) - see
-    bulk_tracking_service.py's module docstring for why this parameter name
-    stays as `sealine` despite no longer meaning SeaRates' sealine/SCAC code.
+async def _lookup(number: str, sealine: str) -> dict:
+    """Shared fetch behind both preview routes below - GoComet create-then-
+    poll on a cache miss (providers/gocomet_http.py), or a straight DB-cache
+    read on a hit (services/bulk_tracking_service.py's `track_with_cache`).
+    Calling this twice for the same number in quick succession (once for the
+    summary route, once for the events route) costs one live GoComet lookup,
+    not two - the second call hits the DB cache the first call just wrote.
     """
     pool = get_pool(_tracker_proxy_kwargs())
     tracker = pool.acquire()
@@ -87,7 +101,35 @@ async def track_searates(number: str, sealine: str = "AUTO"):
     return result
 
 
-@router.post("/track-searates/bulk")
+@router.get("/track-searates/{number}", response_model=TrackingSummaryOut)
+async def track_searates(number: str, sealine: str = "AUTO"):
+    """
+    Container identity/status/carrier/route summary only - no event
+    timeline, no internal scrape timing. See `/track-searates/{number}/events`
+    for the milestone timeline, split out into its own endpoint/payload so
+    this one stays small for the common case (a caller just wants to know
+    whether a number resolved and its current status).
+    """
+    result = await _lookup(number, sealine)
+    return TrackingSummaryOut(**{field: result.get(field) for field in TrackingSummaryOut.model_fields})
+
+
+@router.get("/track-searates/{number}/events", response_model=TrackingEventsOut)
+async def track_searates_events(number: str, sealine: str = "AUTO"):
+    """
+    Milestone timeline only, split out of the summary route above. Reuses
+    the same cached/live lookup (`_lookup`) - fetching the summary first and
+    then this doesn't pay for a second GoComet scrape.
+    """
+    result = await _lookup(number, sealine)
+    return TrackingEventsOut(
+        number=result.get("number"),
+        found=bool(result.get("found")),
+        events=[TrackingEventOut(**e) for e in (result.get("events") or [])],
+    )
+
+
+@router.post("/track-searates/bulk", response_model=TrackingBulkResponseOut)
 async def track_searates_bulk(request: BulkTrackRequest):
     """
     Fans `container_numbers` out across `batch_size` concurrent
@@ -97,6 +139,11 @@ async def track_searates_bulk(request: BulkTrackRequest):
     browser-based routes use, so duplicate container numbers within a batch
     mostly hit that cache after the first live lookup - important given
     GoComet's monthly (not per-request) quota.
+
+    Per-item results carry the same trimmed summary fields as
+    `/track-searates/{number}` (no event timeline, no scrape timing) -
+    fetch `/track-searates/{number}/events` per container if the timeline
+    is needed for one of them.
     """
     if not request.container_numbers:
         raise HTTPException(status_code=400, detail="container_numbers must not be empty")
@@ -113,7 +160,19 @@ async def track_searates_bulk(request: BulkTrackRequest):
         batch_size=request.batch_size,
         **_tracker_proxy_kwargs(),
     )
-    return result
+    items = [
+        TrackingBulkItemOut(**{field: (r or {}).get(field) for field in TrackingBulkItemOut.model_fields})
+        for r in result["results"]
+    ]
+    return TrackingBulkResponseOut(
+        total=result["total"],
+        batch_size=result["batch_size"],
+        total_duration_seconds=result["total_duration_seconds"],
+        success_count=result["success_count"],
+        error_count=result["error_count"],
+        throughput_per_sec=result["throughput_per_sec"],
+        results=items,
+    )
 
 
 @router.get("/track-searates-browser/{number}")
