@@ -23,6 +23,30 @@ def test_tracking_a_container_deducts_one_credit(client, api_key):
     assert items[0]["container_number"] == "MSCU1234567"
 
 
+def test_track_new_container_with_no_credits_leaves_no_orphaned_row(client, api_key, db_session):
+    """Regression test: UsageRepository.try_deduct_credits() commits
+    unconditionally (it's an atomic UPDATE, not a plain read-then-write),
+    even on the insufficient-credits path - track() used to create the
+    TrackedContainer row *before* charging, so that unconditional commit
+    silently persisted a brand-new, never-charged, never-processed row
+    every time a customer POSTed a new number after running out of
+    credits. Confirmed live against production data - a real contributor
+    to containers stuck permanently `queued`."""
+    from app.core.security import hash_token
+    from app.models.api_key import ApiKey
+    from app.repositories.usage import UsageRepository
+
+    key_row = db_session.query(ApiKey).filter_by(key_hash=hash_token(api_key)).one()
+    UsageRepository().try_deduct_credits(db_session, key_row.organization_id, 10)  # drain to zero
+
+    resp = client.post("/v1/containers", json={"container_number": "NEWU0000001"}, headers={"X-API-Key": api_key})
+    assert resp.status_code == 429
+
+    listed = client.get("/v1/containers", headers={"X-API-Key": api_key}).json()
+    assert listed["total"] == 0
+    assert listed["items"] == []
+
+
 def test_free_plan_exhausted_returns_429_upgrade_message(client, api_key, db_session):
     """A signed-up org with no Subscription row is still on the one-time
     free-signup grant, which never renews - the 429 it gets back once that

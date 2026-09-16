@@ -117,13 +117,30 @@ class ContainerService:
         if not created and not self._needs_live_lookup(container):
             return container
 
-        self.usage.charge(
-            db,
-            organization_id=organization_id,
-            api_key_id=api_key_id,
-            event_type=UsageEventType.CONTAINER_LOOKUP,
-            container_number=container_number,
-        )
+        try:
+            self.usage.charge(
+                db,
+                organization_id=organization_id,
+                api_key_id=api_key_id,
+                event_type=UsageEventType.CONTAINER_LOOKUP,
+                container_number=container_number,
+            )
+        except AppError:
+            if created:
+                # UsageRepository.try_deduct_credits() commits unconditionally,
+                # even on the insufficient-credits path (it's an atomic
+                # UPDATE, not a plain check) - that commit would otherwise
+                # persist this brand-new row despite the charge failing,
+                # leaving a permanent, never-charged, never-processed
+                # "queued" row behind (confirmed live: this is a real
+                # contributor to the "queued forever" bug - a customer
+                # testing many new numbers against a low/exhausted balance
+                # accumulates one of these per failed number). Delete it
+                # instead of letting a failed charge silently create a
+                # free, orphaned row.
+                db.delete(container)
+                db.commit()
+            raise
         # Commit (releasing the pooled DB connection) before the slow
         # provider scrape, same as the worker's _process_in_own_session -
         # otherwise this connection sits checked out of the pool for the
