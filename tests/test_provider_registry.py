@@ -230,6 +230,17 @@ def test_romeu_provider_only_supports_romu_prefix():
     assert provider.supports("MSKU1234567") is False
 
 
+def test_romeu_adapt_never_sets_vessel_or_voyage():
+    """Romeu's raw `movements` payload has no vessel/voyage concept at all -
+    a container resolved via Romeu must show these as null, not error or
+    silently guess. Real source limitation, not a mapping bug - see
+    RomeuHttpProvider's class docstring."""
+    result = RomeuHttpProvider._adapt(ROMEU_RAW_SUCCESS)
+    assert result.vessel is None
+    assert result.voyage is None
+    assert all(event.vessel is None and event.voyage is None for event in result.events)
+
+
 # --- ProviderRegistry fallback/ordering behavior --------------------------------
 
 
@@ -241,15 +252,22 @@ class _FakeProvider:
         self._raises = raises
         self.calls: list[str] = []
         self.resume_ids: list[str | None] = []
+        self.carrier_hints: list[str | None] = []
 
     def supports(self, container_number: str) -> bool:
         return self._supports_fn(container_number)
 
     async def track(
-        self, container_number: str, *, resume_id: str | None = None, on_created=None
+        self,
+        container_number: str,
+        *,
+        resume_id: str | None = None,
+        carrier_hint: str | None = None,
+        on_created=None,
     ) -> NormalizedTrackingResult:
         self.calls.append(container_number)
         self.resume_ids.append(resume_id)
+        self.carrier_hints.append(carrier_hint)
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -321,6 +339,18 @@ async def test_registry_forwards_resume_id_to_the_provider_that_handles_the_numb
     await ProviderRegistry([provider]).track("MSKU1234567", resume_id="abc-123")
 
     assert provider.resume_ids == ["abc-123"]
+
+
+@pytest.mark.asyncio
+async def test_registry_forwards_carrier_hint_to_the_provider_that_handles_the_number():
+    """A customer's own carrier_scac guess must reach whichever provider
+    ends up trying this number, so it can be used as a resolution hint
+    (see GoCometHttpProvider - the only adapter that currently uses it)."""
+    provider = _FakeProvider("gocomet-ish", result=NormalizedTrackingResult(ok=True, status="found"))
+
+    await ProviderRegistry([provider]).track("MSKU1234567", carrier_hint="MSC")
+
+    assert provider.carrier_hints == ["MSC"]
 
 
 # --- GoCometTracker._parse: real captured response shapes -----------------
@@ -504,6 +534,10 @@ def test_gocomet_adapt_pending_or_not_found_is_a_miss():
     # tracking_id is preserved even on a miss - a resumed poll or a
     # not-found result both still cost a real create call worth persisting.
     assert result.provider_tracking_id == "fe62bba9-e82e-4753-83b5-9e1156bb9585"
+    # GoComet can still resolve/echo a carrier on a miss - worth enriching
+    # carrier_scac even when this attempt itself doesn't find real data.
+    assert result.carrier_code == "MSCU"
+    assert result.carrier_name == "MSC"
 
 
 def test_gocomet_adapt_resolved_status_is_a_hit_with_events():
@@ -518,6 +552,8 @@ def test_gocomet_adapt_resolved_status_is_a_hit_with_events():
     assert len(result.events) == 4
     assert result.events[-1].location == "Jeddah, SA"
     assert result.provider_tracking_id == "bf2fff87-bf2a-4f3c-9729-2b521eb4e063"
+    assert result.carrier_code == "COSU"
+    assert result.carrier_name == "COSCO"
 
 
 def test_gocomet_events_parse_ddmmyyyy_dates_and_sort_chronologically():

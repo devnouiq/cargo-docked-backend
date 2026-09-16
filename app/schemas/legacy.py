@@ -22,6 +22,14 @@ class TrackResponse(BaseModel):
     raw_data: Optional[dict]
     cached: bool = False
     duration_seconds: Optional[float] = None
+    # Additive (both optional, default None) - this deprecated response
+    # shape originally had no equivalent of the standardized API's
+    # tracking_status/tracking_message fields at all, meaning a client
+    # reading either key here always got a missing key (which most JSON
+    # tooling reports as null with no further explanation) rather than a
+    # real value. See routers/tracking.py's _to_track_response().
+    tracking_status: Optional[str] = None
+    tracking_message: Optional[str] = None
 
 
 class BulkTrackRequest(BaseModel):

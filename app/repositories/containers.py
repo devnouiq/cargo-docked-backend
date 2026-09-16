@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session, joinedload
 
-from ..models.container import ContainerEvent, TrackedContainer
+from ..models.container import ContainerEvent, ContainerScrapeStatus, TrackedContainer
 
 if TYPE_CHECKING:
     from ..providers.base import NormalizedTrackingResult
@@ -119,6 +119,39 @@ class ContainerRepository:
         container.is_active = False
         db.flush()
 
+    def find_stuck(self, db: Session, *, older_than: datetime) -> list[TrackedContainer]:
+        """Rows still `queued`/`in_progress` that haven't been touched since
+        before `older_than` - used by workers/tasks/scrape.py's
+        `sweep_stuck_scrapes` to correct rows a crashed/timed-out job (or a
+        job that never got enqueued) left permanently pending.
+
+        Filters by status in SQL, then compares `updated_at` in Python
+        (normalizing naive-vs-aware) rather than in the query itself -
+        matching `container_cache.py`'s existing TTL-check convention,
+        since SQLite (used in tests) doesn't reliably round-trip
+        `DateTime(timezone=True)` comparisons done at the SQL level the
+        same way Postgres does.
+        """
+        pending = (
+            db.query(TrackedContainer)
+            .filter(
+                TrackedContainer.tracking_status.in_(
+                    (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS)
+                )
+            )
+            .all()
+        )
+        if older_than.tzinfo is None:
+            older_than = older_than.replace(tzinfo=timezone.utc)
+
+        def _is_older(container: TrackedContainer) -> bool:
+            updated_at = container.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            return updated_at < older_than
+
+        return [c for c in pending if _is_older(c)]
+
     def apply_provider_result(
         self, db: Session, container: TrackedContainer, *, result: "NormalizedTrackingResult"
     ) -> list[ContainerEvent]:
@@ -137,6 +170,10 @@ class ContainerRepository:
         """
         container.status = result.status or container.status
         container.raw_data = result.raw_data or container.raw_data
+        # Provider-resolved carrier wins once known - more authoritative
+        # than whatever the customer originally guessed on create (or than
+        # nothing, if they didn't supply one at all).
+        container.carrier_scac = result.carrier_code or container.carrier_scac
 
         existing_events = list(container.events)
         existing_keys = {(e.event_code, _normalize_occurred_at(e.occurred_at)) for e in existing_events}

@@ -49,6 +49,15 @@ class NormalizedTrackingResult:
     # ContainerService onto TrackedContainer.provider_tracking_id so a later
     # refresh can resume polling instead of paying for a fresh create.
     provider_tracking_id: str | None = None
+    # The carrier a provider actually resolved this container to (SCAC-style
+    # code + display name) - None for providers with no such concept (e.g.
+    # Romeu, which is carrier-specific by construction). Populated by
+    # GoCometHttpProvider._adapt() from GoComet's own resolved carrier;
+    # ContainerRepository.apply_provider_result writes carrier_code onto
+    # TrackedContainer.carrier_scac once known, since it's more authoritative
+    # than whatever the customer originally guessed on create.
+    carrier_code: str | None = None
+    carrier_name: str | None = None
 
 
 class TrackingProvider(Protocol):
@@ -65,11 +74,17 @@ class TrackingProvider(Protocol):
         container_number: str,
         *,
         resume_id: str | None = None,
+        carrier_hint: str | None = None,
         on_created: object | None = None,
     ) -> NormalizedTrackingResult:
         """`resume_id`: a previously-persisted `provider_tracking_id` this
         provider issued for this container, if any - providers with no
         create-then-poll concept (SeaRates, Romeu) just ignore it.
+        `carrier_hint`: the customer's own `carrier_scac` guess at create
+        time, if any - passed straight through as a resolution hint to
+        providers that can use one (currently GoComet, as `carrier_code`);
+        providers with no such concept (Romeu is carrier-specific by
+        construction) just ignore it.
         `on_created`: optional `Callable[[str], None]`, invoked synchronously
         the instant a *new* provider-side tracking id is obtained (before any
         polling), so the caller can persist it right away. Typed as `object`

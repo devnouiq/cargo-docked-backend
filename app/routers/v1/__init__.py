@@ -5,13 +5,14 @@ per resource - new resources register themselves here, not in main.py.
 
 from fastapi import APIRouter
 
-from . import api_keys, auth, billing, contact, containers, organizations, status, usage, webhooks
+from . import api_keys, auth, billing, carriers, contact, containers, organizations, status, usage, webhooks
 
 v1_router = APIRouter()
 v1_router.include_router(auth.router)
 v1_router.include_router(organizations.router)
 v1_router.include_router(api_keys.router)
 v1_router.include_router(containers.router)
+v1_router.include_router(carriers.router)
 v1_router.include_router(usage.router)
 v1_router.include_router(webhooks.router)
 v1_router.include_router(billing.router)

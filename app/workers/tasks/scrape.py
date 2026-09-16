@@ -45,3 +45,42 @@ async def scrape_container(ctx: dict, container_id: str) -> None:
         # only hand arq a retry decision it has no business making (and
         # a retried scrape re-fires `container.updated` webhooks).
         logger.exception("scrape_container: failed for container %s", container_id)
+
+
+async def sweep_stuck_scrapes(ctx: dict) -> None:
+    """Cron job (registered in workers/arq_app.py): corrects any
+    `TrackedContainer` row left `queued`/`in_progress` past
+    `settings.scrape_stuck_threshold_s` with no job ever resolving it -
+    either the job that owned it crashed/was cancelled (arq's job-timeout
+    cancellation not being caught was one confirmed cause, now fixed in
+    ContainerService._refresh_and_apply_safely) or it was never actually
+    enqueued at all (`_enqueue_scrapes` is best-effort - a Redis hiccup
+    leaves a row `queued` with no job behind it).
+
+    Deliberately narrow: this ONLY corrects the row's status to `FAILED`
+    with an explanatory message. It never re-enqueues a scrape and never
+    charges a credit - unlike the old `refresh_tracked_containers` poller
+    (removed - see arq_app.py's module docstring) that re-scraped on a
+    timer and silently spent customer credits. A customer whose container
+    lands here can freely retry it themselves afterwards (GET/refresh no
+    longer treat a `FAILED` row as pending).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from ...core.config import settings
+    from ...db.session import SessionLocal
+    from ...models.container import ContainerScrapeStatus
+    from ...repositories.containers import ContainerRepository
+
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.scrape_stuck_threshold_s)
+    repo = ContainerRepository()
+    with SessionLocal() as db:
+        stuck = repo.find_stuck(db, older_than=cutoff)
+        for container in stuck:
+            container.tracking_status = ContainerScrapeStatus.FAILED
+            container.tracking_message = (
+                "Scrape did not complete in time - please try again."
+            )
+        if stuck:
+            db.commit()
+            logger.warning("sweep_stuck_scrapes: marked %d stuck container(s) as failed", len(stuck))

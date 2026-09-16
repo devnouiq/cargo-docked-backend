@@ -129,7 +129,7 @@ async def test_tracking_id_survives_a_crash_mid_poll(db_session, api_key, _fake_
     org_id = _org_id_for(db_session, api_key)
     container = _queued_container(db_session, organization_id=org_id, number="MSKU1234567")
 
-    async def _track_then_crash(container_number, *, resume_id=None, on_created=None):
+    async def _track_then_crash(container_number, *, resume_id=None, carrier_hint=None, on_created=None):
         if on_created is not None:
             on_created("gocomet-tracking-id-123")
         raise RuntimeError("simulated crash mid-poll")

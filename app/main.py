@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .core.config import settings
 from .core.errors import register_exception_handlers
 from .core.logging import configure_logging
-from .core.middleware import RequestContextMiddleware
+from .core.middleware import RateLimitHeadersMiddleware, RequestContextMiddleware
 from .providers.browser_session import close_scraper_session
 from .routers import searates_debug, tracking
 from .routers.v1 import v1_router
@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(RateLimitHeadersMiddleware)
 
     register_exception_handlers(app)
 

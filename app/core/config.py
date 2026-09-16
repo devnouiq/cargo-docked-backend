@@ -129,6 +129,19 @@ class Settings(BaseSettings):
     # Hard bound on one queued scrape job. The provider chain includes two
     # browser-based fallbacks and has no timeout of its own.
     scrape_job_timeout_s: int = 240
+    # A row sitting `queued`/`in_progress` longer than this is treated as
+    # stuck (the job that owned it crashed/timed out/was never enqueued),
+    # not merely slow - see ContainerService._is_pending and
+    # workers/tasks/scrape.py's sweep_stuck_scrapes. Comfortably above
+    # scrape_job_timeout_s so a legitimately slow-but-alive scrape is never
+    # mistaken for stuck.
+    scrape_stuck_threshold_s: int = 480
+    # Suggested poll interval surfaced to API callers via the `Retry-After`
+    # header / `poll_after_seconds` field on 202 responses - matches
+    # GoComet's own fast-poll window (providers/gocomet_http.py's
+    # poll_fast_interval_s) so it reflects how quickly a scrape can
+    # realistically resolve, not an arbitrary number.
+    recommended_poll_interval_s: int = 5
 
     @computed_field  # type: ignore[misc]
     @property

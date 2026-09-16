@@ -19,6 +19,7 @@ enqueue onto, so no test needs a Redis either.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 # Defaults to a throwaway SQLite file so the suite never touches a real
@@ -99,20 +100,36 @@ class _FakeProviderRegistry:
     def __init__(self):
         self.calls: list[str] = []
         self.resume_ids: list[str | None] = []
+        self.carrier_hints: list[str | None] = []
 
     async def track(
-        self, container_number: str, *, resume_id: str | None = None, on_created=None
+        self,
+        container_number: str,
+        *,
+        resume_id: str | None = None,
+        carrier_hint: str | None = None,
+        on_created=None,
     ) -> NormalizedTrackingResult:
         self.calls.append(container_number)
         self.resume_ids.append(resume_id)
-        if container_number.upper().startswith("MISS"):
+        self.carrier_hints.append(carrier_hint)
+        number = container_number.upper()
+        if number.startswith("MISS"):
             return NormalizedTrackingResult(ok=False, error="not found by fake provider")
+        if number.startswith("CANCEL"):
+            # Simulates arq's job-timeout cancellation reaching mid-scrape
+            # code (asyncio.CancelledError, a BaseException) - see
+            # ContainerService._refresh_and_apply_safely's
+            # `except (Exception, asyncio.CancelledError)`.
+            raise asyncio.CancelledError()
         return NormalizedTrackingResult(
             ok=True,
             status="In Transit",
             location="Rotterdam",
             provider_name="fake",
             raw_data={"fake": True},
+            carrier_code="MSCU",
+            carrier_name="MSC",
         )
 
     async def warm(self, count: int) -> None:

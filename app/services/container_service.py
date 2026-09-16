@@ -15,12 +15,14 @@ at submission time, so the worker path must charge nothing (see
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from ..core.carrier_coverage import is_known_unsupported
 from ..core.config import settings
 from ..core.errors import AppError, NotFoundError
 from ..db.session import SessionLocal
@@ -43,6 +45,10 @@ logger = logging.getLogger(__name__)
 # by ContainerOut).
 _NO_DATA_MESSAGE = "Container data is not yet available. Try again later or verify the container number is correct."
 _FAILED_MESSAGE = "We couldn't update this container's tracking status. Please try again shortly."
+_UNSUPPORTED_CARRIER_MESSAGE = (
+    "This container's carrier prefix is not currently supported by our tracking provider. "
+    "See GET /v1/carriers for known coverage gaps."
+)
 
 
 def _infer_webhook_events(*, previous_status: str | None, result: NormalizedTrackingResult, new_event_codes: list[str]) -> list[WebhookEventType]:
@@ -168,22 +174,45 @@ class ContainerService:
 
         return container
 
+    @classmethod
+    def _is_pending(cls, container: TrackedContainer) -> bool:
+        """`queued`/`in_progress` normally means a worker (or this same
+        request, mid-flight) already owns this row's next result - except
+        when it's been sitting in that state for longer than
+        `scrape_stuck_threshold_s`, which means the job that owned it never
+        finished (crashed, timed out, or was never actually enqueued - see
+        `_enqueue_scrapes`) and nothing is coming. Treating a row like that
+        as still "pending" forever is exactly the customer-reported bug
+        this guards against: no GET/refresh/track call could ever force a
+        fresh attempt on it. `sweep_stuck_scrapes` (workers/tasks/scrape.py)
+        eventually corrects these rows to `FAILED` in the background too;
+        this is the immediate, synchronous escape hatch for a customer who
+        polls before that sweep runs.
+        """
+        if container.tracking_status not in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS):
+            return False
+        return not cls._is_stuck(container.updated_at)
+
     @staticmethod
-    def _is_pending(container: TrackedContainer) -> bool:
-        return container.tracking_status in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS)
+    def _is_stuck(updated_at: datetime | None) -> bool:
+        if updated_at is None:
+            return False
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - updated_at > timedelta(seconds=settings.scrape_stuck_threshold_s)
 
     @classmethod
     def _needs_live_lookup(cls, container: TrackedContainer) -> bool:
         """Whether a read/track call should trigger (and charge for) a live
         provider lookup for this already-tracked container.
 
-        False while a scrape is already `queued`/`in_progress` - a
-        background worker (queue_bulk/request_refresh) already owns this
-        row's next result, so charging/scraping again here would double-bill
-        and race the worker writing to the same row. False again once that
-        settles and the row is fresh (`last_polled_at` within
-        `container_cache_ttl_seconds`) - only a genuinely stale row needs a
-        new live lookup.
+        False while a scrape is already `queued`/`in_progress` (and not
+        stuck - see `_is_pending`) - a background worker (queue_bulk/
+        request_refresh) already owns this row's next result, so charging/
+        scraping again here would double-bill and race the worker writing
+        to the same row. False again once that settles and the row is
+        fresh (`last_polled_at` within `container_cache_ttl_seconds`) - only
+        a genuinely stale row needs a new live lookup.
         """
         if cls._is_pending(container):
             return False
@@ -269,7 +298,7 @@ class ContainerService:
                 "POST /v1/containers to start tracking it."
             )
 
-        if container.tracking_status in (ContainerScrapeStatus.QUEUED, ContainerScrapeStatus.IN_PROGRESS):
+        if self._is_pending(container):
             return container
 
         self.usage.charge(
@@ -384,7 +413,19 @@ class ContainerService:
         try:
             await self._refresh_and_apply(db, container)
             db.commit()
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
+            # asyncio.CancelledError is a BaseException (not Exception) since
+            # Python 3.8 - a plain `except Exception` misses it entirely.
+            # arq delivers exactly this into whichever await this coroutine
+            # is suspended on when a job's timeout fires
+            # (WorkerSettings.functions' timeout=scrape_job_timeout_s) -
+            # without catching it here too, a timed-out scrape left this
+            # row permanently `IN_PROGRESS` with no terminal status ever
+            # written (the customer-reported "queued/in_progress forever,
+            # no recovery path" bug). Still re-raised below, so arq's own
+            # cancellation bookkeeping is untouched - this only ensures the
+            # row itself gets a terminal status first.
+            #
             # The rollback expires `container`; re-fetch before writing the
             # terminal status or we'd just touch a detached object.
             db.rollback()
@@ -406,6 +447,7 @@ class ContainerService:
         result = await self.registry.track(
             container.container_number,
             resume_id=container.provider_tracking_id,
+            carrier_hint=container.carrier_scac,
             on_created=lambda tid: self._persist_tracking_id_early(container.id, tid),
         )
         # Reflect whatever the provider ended up using (new id from a fresh
@@ -425,10 +467,24 @@ class ContainerService:
             container.raw_data = {**(container.raw_data or {}), "last_error": result.error}
             container.last_polled_at = datetime.now(timezone.utc)
             container.tracking_status = ContainerScrapeStatus.NO_DATA
+            # A provider can resolve/echo a carrier even on a miss (GoComet
+            # confirmed live: found=false responses still carry carrier_code/
+            # carrier_name once it identifies the carrier) - still worth
+            # enriching carrier_scac here, same precedence as the success
+            # path below.
+            container.carrier_scac = result.carrier_code or container.carrier_scac
             # Customer-safe, provider-agnostic message - the raw diagnostic
             # (which may name a provider or an internal error string) stays
             # in raw_data, an internal-only field ContainerOut never returns.
-            container.tracking_message = _NO_DATA_MESSAGE
+            # A known-unsupported carrier prefix gets a more specific,
+            # actionable message pointing at GET /v1/carriers instead of the
+            # generic "try again later" (which isn't true for these -
+            # retrying won't help without a provider fix).
+            container.tracking_message = (
+                _UNSUPPORTED_CARRIER_MESSAGE
+                if is_known_unsupported(container.container_number)
+                else _NO_DATA_MESSAGE
+            )
             db.flush()
             return
 

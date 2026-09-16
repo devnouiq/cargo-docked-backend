@@ -36,6 +36,8 @@ def _to_track_response(container) -> TrackResponse:
         raw_data=container.raw_data,
         cached=False,
         duration_seconds=None,
+        tracking_status=container.tracking_status.value,
+        tracking_message=container.tracking_message,
     )
 
 

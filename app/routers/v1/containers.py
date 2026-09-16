@@ -8,8 +8,9 @@ scraper.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 
+from ...core.config import settings
 from ...core.errors import NotFoundError
 from ...db.session import get_db
 from ...dependencies import ApiKeyPrincipal, get_api_key_principal
@@ -55,7 +56,10 @@ async def start_tracking(
 
 @router.post("/bulk", response_model=ContainerBulkResponse, status_code=202)
 async def start_tracking_bulk(
-    payload: ContainerBulkCreateRequest, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db=Depends(get_db)
+    payload: ContainerBulkCreateRequest,
+    response: Response,
+    principal: ApiKeyPrincipal = Depends(get_api_key_principal),
+    db=Depends(get_db),
 ):
     """Queue a batch of containers for tracking. **Accepted, not completed.**
 
@@ -64,9 +68,12 @@ async def start_tracking_bulk(
     comes back with `tracking_status: "queued"` and `status: null`; a
     background worker resolves them shortly afterwards.
 
-    To get results, either poll `GET /v1/containers/{number}` until
-    `tracking_status` is terminal (`completed`, `no_data` or `failed`), or
-    subscribe to the `container.updated` webhook.
+    To get results, either poll `GET /v1/containers/{number}` no more often
+    than every `poll_after_seconds` (also set as this response's `Retry-After`
+    header) until `tracking_status` is terminal (`completed`, `no_data` or
+    `failed`), or - preferred - subscribe to the `container.updated` /
+    `container.arrived` / `container.delayed` / `container.discharged`
+    webhooks instead of polling at all.
 
     Duplicate numbers within one payload are collapsed: one row, one credit,
     one job. `queued` counts the containers accepted, `rejected` those
@@ -83,10 +90,12 @@ async def start_tracking_bulk(
         ContainerBulkResultItem(container_number=number, ok=container is not None, container=container, error=error)
         for number, container, error in results
     ]
+    response.headers["Retry-After"] = str(settings.recommended_poll_interval_s)
     return ContainerBulkResponse(
         results=items,
         queued=sum(1 for item in items if item.ok),
         rejected=sum(1 for item in items if not item.ok),
+        poll_after_seconds=settings.recommended_poll_interval_s,
     )
 
 
@@ -101,7 +110,10 @@ async def get_container(
 
 @router.post("/{number}/refresh", response_model=ContainerOut, status_code=202)
 async def refresh_container(
-    number: str, principal: ApiKeyPrincipal = Depends(get_api_key_principal), db=Depends(get_db)
+    number: str,
+    response: Response,
+    principal: ApiKeyPrincipal = Depends(get_api_key_principal),
+    db=Depends(get_db),
 ):
     """Queue a fresh scrape of an already-tracked container.
 
@@ -109,10 +121,17 @@ async def refresh_container(
     actual lookup. Charges one credit - except when a scrape is already
     pending (`queued`/`in_progress`), in which case the existing container
     is returned unchanged and nothing is charged or re-queued.
+
+    Poll `GET /v1/containers/{number}` no more often than every
+    `settings.recommended_poll_interval_s` (set as this response's
+    `Retry-After` header) - or, preferred, subscribe to the
+    `container.updated` webhook instead of polling.
     """
-    return await _service.request_refresh(
+    container = await _service.request_refresh(
         db, organization_id=principal.organization.id, api_key_id=principal.api_key.id, container_number=number
     )
+    response.headers["Retry-After"] = str(settings.recommended_poll_interval_s)
+    return container
 
 
 @router.get("/{number}/events", response_model=list[ContainerEventOut])

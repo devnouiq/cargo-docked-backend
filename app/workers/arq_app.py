@@ -20,13 +20,13 @@ import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
 
-from arq import func
+from arq import cron, func
 from arq.connections import RedisSettings
 
 from ..core.config import settings
 from ..core.logging import configure_logging
 from ..providers.registry import build_default_registry
-from .tasks.scrape import scrape_container
+from .tasks.scrape import scrape_container, sweep_stuck_scrapes
 from .tasks.webhook_delivery import deliver_webhook
 
 logger = logging.getLogger(__name__)
@@ -90,6 +90,13 @@ class WorkerSettings:
         # poller that used to do that was removed).
         func(scrape_container, name="scrape_container", timeout=settings.scrape_job_timeout_s, max_tries=1),
     ]
+    # Narrow status-correction sweep, NOT a re-scrape poller - see
+    # sweep_stuck_scrapes' own docstring for why this is a different,
+    # deliberately safer thing than the `refresh_tracked_containers` cron
+    # removed earlier (that one re-scraped on a timer and re-charged
+    # credits; this one only fixes rows stuck with no job ever resolving
+    # them, and never charges or re-enqueues anything).
+    cron_jobs = [cron(sweep_stuck_scrapes, minute=set(range(0, 60, 5)))]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     on_startup = _on_startup
     on_shutdown = _on_shutdown

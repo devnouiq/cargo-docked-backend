@@ -262,3 +262,81 @@ def test_containers_route_requires_api_key_not_jwt(client, signed_up_org):
     _tokens, jwt_headers = signed_up_org
     resp = client.get("/v1/containers", headers=jwt_headers)
     assert resp.status_code == 401
+
+
+def test_carrier_scac_is_enriched_from_the_resolved_provider(client, api_key, _fake_provider_registry):
+    """A customer's own carrier_scac guess is forwarded to the provider as a
+    hint, and overwritten by whatever the provider actually resolves - see
+    ProviderRegistry.track()'s carrier_hint param and
+    ContainerRepository.apply_provider_result."""
+    resp = client.post(
+        "/v1/containers",
+        json={"container_number": "MSKU8888888", "carrier_scac": "GUESS"},
+        headers={"X-API-Key": api_key},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["carrier_scac"] == "MSCU"  # fake provider always resolves to MSCU/MSC
+    assert _fake_provider_registry.carrier_hints[-1] == "GUESS"
+
+
+def test_bulk_response_includes_poll_after_seconds_and_retry_after_header(client, api_key):
+    resp = client.post(
+        "/v1/containers/bulk", json={"container_numbers": ["MSKU9999999"]}, headers={"X-API-Key": api_key}
+    )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["poll_after_seconds"] > 0
+    assert resp.headers["Retry-After"] == str(resp.json()["poll_after_seconds"])
+
+
+def test_refresh_response_includes_retry_after_header(client, api_key, fake_arq_pool):
+    client.post("/v1/containers", json={"container_number": "MSKU7777777"}, headers={"X-API-Key": api_key})
+    resp = client.post("/v1/containers/MSKU7777777/refresh", headers={"X-API-Key": api_key})
+    assert resp.status_code == 202, resp.text
+    assert int(resp.headers["Retry-After"]) > 0
+
+
+def test_rate_limit_headers_present_on_api_key_requests(client, api_key):
+    resp = client.get("/v1/containers", headers={"X-API-Key": api_key})
+    assert resp.status_code == 200
+    assert int(resp.headers["X-RateLimit-Limit"]) >= 0
+    assert int(resp.headers["X-RateLimit-Remaining"]) >= 0
+
+
+def test_rate_limit_headers_absent_without_api_key_auth(client, signed_up_org):
+    """These headers are derived from an org's credit balance via
+    `request.state.organization_id`, only ever stashed by API-key auth - a
+    JWT-authenticated dashboard route must not carry them."""
+    _tokens, jwt_headers = signed_up_org
+    resp = client.get("/v1/auth/organizations", headers=jwt_headers)
+    assert resp.status_code == 200
+    assert "X-RateLimit-Limit" not in resp.headers
+
+
+def test_retry_after_and_reset_present_on_quota_exceeded_429(client, api_key, db_session):
+    """An active (non-lapsed) subscription has a real renewal date - the 429
+    it produces once credits run out should tell the caller exactly how
+    long to wait, not just that it must."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.security import hash_token
+    from app.models.api_key import ApiKey
+    from app.models.billing import Plan, Subscription, SubscriptionStatus
+    from app.repositories.usage import UsageRepository
+
+    key_row = db_session.query(ApiKey).filter_by(key_hash=hash_token(api_key)).one()
+    org_id = key_row.organization_id
+    plan = db_session.query(Plan).filter_by(code="feeder").one()
+    period_end = datetime.now(timezone.utc) + timedelta(days=3)
+    db_session.add(
+        Subscription(
+            organization_id=org_id, plan_id=plan.id, status=SubscriptionStatus.ACTIVE, current_period_end=period_end
+        )
+    )
+    db_session.commit()
+    UsageRepository().try_deduct_credits(db_session, org_id, 10)  # drain the leftover free-signup credits
+    db_session.commit()
+
+    resp = client.post("/v1/containers", json={"container_number": "MSCU7654321"}, headers={"X-API-Key": api_key})
+    assert resp.status_code == 429
+    assert int(resp.headers["Retry-After"]) > 0
+    assert resp.headers["X-RateLimit-Reset"]

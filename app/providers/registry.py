@@ -378,21 +378,28 @@ class GoCometHttpProvider:
             self._local.tracker = tracker
         return tracker
 
-    def _track_sync(self, container_number: str, resume_id: str | None, on_created) -> dict:
+    def _track_sync(self, container_number: str, resume_id: str | None, carrier_hint: str | None, on_created) -> dict:
         tracker = self._get_tracker()
         try:
-            return tracker.track(container_number, resume_id=resume_id, on_created=on_created)
+            return tracker.track(
+                container_number, resume_id=resume_id, carrier_code=carrier_hint, on_created=on_created
+            )
         except Exception:
             self._local.tracker = None
             raise
 
     async def track(
-        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+        self,
+        container_number: str,
+        *,
+        resume_id: str | None = None,
+        carrier_hint: str | None = None,
+        on_created: object | None = None,
     ) -> NormalizedTrackingResult:
         async with self._semaphore:
             try:
                 raw = await asyncio.wait_for(
-                    asyncio.to_thread(self._track_sync, container_number, resume_id, on_created),
+                    asyncio.to_thread(self._track_sync, container_number, resume_id, carrier_hint, on_created),
                     timeout=self._ATTEMPT_TIMEOUT_S,
                 )
             except asyncio.TimeoutError:
@@ -432,6 +439,13 @@ class GoCometHttpProvider:
                 error=parsed.get("invalid_reason") or parsed.get("display_status") or parsed.get("status") or "no data returned",
                 raw_data=parsed,
                 provider_tracking_id=parsed.get("tracking_id"),
+                # GoComet can resolve/echo a carrier even on a miss (e.g. a
+                # valid-but-not-yet-found container) - worth carrying
+                # through so ContainerRepository.apply_provider_result can
+                # still enrich carrier_scac even when this attempt itself
+                # is a miss.
+                carrier_code=parsed.get("carrier_code"),
+                carrier_name=parsed.get("carrier_name"),
             )
 
         events = [
@@ -455,12 +469,23 @@ class GoCometHttpProvider:
             events=events,
             raw_data=parsed,
             provider_tracking_id=parsed.get("tracking_id"),
+            carrier_code=parsed.get("carrier_code"),
+            carrier_name=parsed.get("carrier_name"),
         )
 
 
 class RomeuHttpProvider:
     """Adapts providers/romeu_http.py (untouched) - Romeu Shipping's own API,
-    only relevant for containers it operates directly (ROMU prefix)."""
+    only relevant for containers it operates directly (ROMU prefix).
+
+    Romeu's raw `movements` payload has no vessel/voyage/carrier-code
+    concept at all (just `code`/`description`/`port`/`date` per movement) -
+    `_adapt` below genuinely has nothing to map onto `NormalizedEvent.vessel`/
+    `.voyage`/`NormalizedTrackingResult.carrier_code`, unlike GoComet where
+    that data exists upstream and was just being dropped. A container
+    resolved via Romeu will always show `vessel`/`voyage` as null - this is
+    a real source limitation, not a bug to fix here.
+    """
 
     name = "romeu_http"
 
@@ -468,8 +493,15 @@ class RomeuHttpProvider:
         return container_number.strip().upper().startswith("ROMU")
 
     async def track(
-        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+        self,
+        container_number: str,
+        *,
+        resume_id: str | None = None,
+        carrier_hint: str | None = None,
+        on_created: object | None = None,
     ) -> NormalizedTrackingResult:
+        # carrier_hint ignored: this provider only ever claims ROMU-prefixed
+        # numbers (see supports() above), so the carrier is never ambiguous.
         tracker = RomeuShippingTracker(RomeuTrackerConfig(**_tracker_proxy_kwargs()))
         try:
             raw = await asyncio.to_thread(tracker.track, container_number)
@@ -568,19 +600,28 @@ class ProviderRegistry:
         return [p.name for p in self._providers]
 
     async def track(
-        self, container_number: str, *, resume_id: str | None = None, on_created: object | None = None
+        self,
+        container_number: str,
+        *,
+        resume_id: str | None = None,
+        carrier_hint: str | None = None,
+        on_created: object | None = None,
     ) -> NormalizedTrackingResult:
         """`resume_id`/`on_created` are forwarded to whichever provider ends
         up handling this number - only meaningful to providers with a
         create-then-poll concept (currently GoComet); every other provider's
-        `track()` accepts and ignores them (see base.py's Protocol)."""
+        `track()` accepts and ignores them (see base.py's Protocol).
+        `carrier_hint` (the customer's own `carrier_scac` guess, if any) is
+        forwarded the same way - only GoComet can use it today."""
         attempted: list[str] = []
         for provider in self._providers:
             if not provider.supports(container_number):
                 continue
             attempted.append(provider.name)
             try:
-                result = await provider.track(container_number, resume_id=resume_id, on_created=on_created)
+                result = await provider.track(
+                    container_number, resume_id=resume_id, carrier_hint=carrier_hint, on_created=on_created
+                )
             except Exception:  # noqa: BLE001 - one provider's bug must not sink the whole lookup
                 logger.exception("provider %s raised while tracking %s", provider.name, container_number)
                 continue
