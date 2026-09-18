@@ -155,7 +155,26 @@ async def _worker(
                     duration, " [db cache hit]" if result.get("_db_cache_hit") else "",
                 )
             else:
-                result = {"number": number, "status": "error", "message": error_message, "duration_seconds": duration}
+                # `found` must always be present and boolean - the router
+                # builds TrackingBulkItemOut(**{field: (r or {}).get(field)
+                # for field in TrackingBulkItemOut.model_fields}) for every
+                # item in the batch in one list comprehension (searates_debug.
+                # py's track_searates_bulk), and `found` is a plain `bool`
+                # there, not `bool | None`. A dict missing this key made
+                # `.get("found")` return None, which Pydantic rejects for a
+                # bool field - raising uncaught and crashing construction of
+                # the *entire* batch's response, discarding every other
+                # container's already-resolved result along with it.
+                # Reproduced live: a single unresolvable-carrier container
+                # was enough to 500 a batch of one.
+                result = {
+                    "number": number,
+                    "status": "error",
+                    "found": False,
+                    "invalid_reason": error_message,
+                    "message": error_message,
+                    "duration_seconds": duration,
+                }
                 logger.error("[worker %d] %s failed after %ss: %s", worker_id, number, duration, error_message)
 
             results[index] = result
